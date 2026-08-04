@@ -41,8 +41,8 @@ function title(kicker: string, heading: string, text?: string): Content {
   return {
     stack: [
       { text: kicker.toUpperCase(), style: "kicker" },
-      { text: heading, style: "pageTitle", margin: [0, 5, 0, text ? 8 : 18] },
-      ...(text ? [{ text, style: "lead", margin: [0, 0, 0, 18] }] : []),
+      { text: heading, style: "pageTitle", margin: [0, 5, 0, text ? 8 : 18] as [number, number, number, number] },
+      ...(text ? [{ text, style: "lead", margin: [0, 0, 0, 18] as [number, number, number, number] }] : []),
     ],
   };
 }
@@ -361,7 +361,7 @@ export function buildReportDefinition(data: PdfReportData): TDocumentDefinitions
         ],
       },
       { text: "Бот не должен самостоятельно решать юридические, конфликтные, технически уникальные вопросы и нестандартные коммерческие условия.", style: "lead", margin: [0, 18, 0, 0] },
-    ],
+    ] as Content[],
   };
 }
 
@@ -371,7 +371,7 @@ export async function downloadDetailedReport(data: PdfReportData) {
     import("pdfmake/build/vfs_fonts"),
   ]);
   const fonts = fontsModule.default as unknown as { pdfMake?: { vfs?: Record<string, string> }; vfs?: Record<string, string> };
-  pdfMake.vfs = fonts.pdfMake?.vfs || fonts.vfs || fontsModule.default;
+  (pdfMake as unknown as { vfs: Record<string, string> }).vfs = fonts.pdfMake?.vfs || fonts.vfs || fontsModule.default;
   const safeName = data.community.replace(/[^\p{L}\p{N}]+/gu, "-").replace(/^-|-$/g, "").slice(0, 45);
   pdfMake.createPdf(buildReportDefinition(data)).download(`dialogika-${safeName}-${data.period}-days.pdf`);
 }

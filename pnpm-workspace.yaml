@@ -1,0 +1,9 @@
+packages:
+  - .
+
+allowBuilds:
+  esbuild: true
+  napi-postinstall: true
+  sharp: true
+  unrs-resolver: true
+  workerd: true

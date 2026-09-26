@@ -22,15 +22,35 @@ export type AiDialogResult = {
 };
 
 type Usage = { inputTokens: number; outputTokens: number; totalTokens: number; estimatedCostUsd: number };
+type RouterPayload = {
+  choices?: Array<{ message?: { content?: string } }>;
+  output_text?: string;
+  output?: Array<{ content?: Array<{ type?: string; text?: string }> }>;
+  usage?: { input_tokens?: number; prompt_tokens?: number; output_tokens?: number; completion_tokens?: number; total_tokens?: number };
+  error?: { message?: string };
+};
 
-const MODEL = process.env.OPENAI_MODEL || "gpt-5.6-luna";
+const ROUTER_BASE_URLS = [
+  process.env.OPENAI_BASE_URL || "https://router.cheap/v1",
+  process.env.OPENAI_RESERVE_URL || "https://direct.router-cheap.com/v1",
+].map((value) => value.replace(/\/$/, ""));
+const MODEL_PRIORITY = [
+  process.env.OPENAI_MODEL,
+  "deepseek-v4-flash",
+  "gemini-3.8-flash",
+  "gpt-5.4-mini",
+  "claude-haiku-4-5",
+].filter((value, index, values): value is string => Boolean(value) && values.indexOf(value) === index);
 const PRICES: Record<string, [number, number]> = {
   "gpt-5.6-luna": [1, 6],
   "gpt-5.6-terra": [2.5, 15],
   "gpt-5.6-sol": [5, 30],
+  "gpt-4o": [2.5, 10],
 };
 
-function extractText(payload: any) {
+function extractText(payload: RouterPayload) {
+  const chatContent = payload.choices?.[0]?.message?.content;
+  if (typeof chatContent === "string") return chatContent;
   if (typeof payload.output_text === "string") return payload.output_text;
   for (const item of payload.output || []) {
     for (const part of item.content || []) if (part.type === "output_text" && part.text) return part.text;
@@ -38,10 +58,69 @@ function extractText(payload: any) {
   throw new Error("OpenAI не вернул структурированный результат");
 }
 
-function usageOf(payload: any): Usage {
-  const inputTokens = Number(payload.usage?.input_tokens || 0);
-  const outputTokens = Number(payload.usage?.output_tokens || 0);
-  const [inputPrice, outputPrice] = PRICES[MODEL] || [0, 0];
+function parseStructuredText(text: string) {
+  const candidates = [
+    text.trim(),
+    text.replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/i, "").trim(),
+  ];
+  const firstBrace = text.indexOf("{");
+  const lastBrace = text.lastIndexOf("}");
+  if (firstBrace >= 0 && lastBrace > firstBrace) candidates.push(text.slice(firstBrace, lastBrace + 1));
+  for (const candidate of candidates) {
+    try {
+      return JSON.parse(candidate);
+    } catch {
+      // Router Cheap may wrap structured output in Markdown; try the next representation.
+    }
+  }
+  throw new Error("Модель вернула ответ не в формате JSON");
+}
+
+function dialogsFromParsed(parsed: unknown, schemaName = "vk_dialog_analysis"): AiDialogResult[] {
+  if (Array.isArray(parsed)) return parsed as AiDialogResult[];
+  if (!parsed || typeof parsed !== "object") return [];
+  const record = parsed as Record<string, unknown>;
+  const candidates = [
+    record.dialogs,
+    record.results,
+    (record.data as Record<string, unknown> | undefined)?.dialogs,
+    (record.result as Record<string, unknown> | undefined)?.dialogs,
+    (record.analysis as Record<string, unknown> | undefined)?.dialogs,
+    (record[schemaName] as Record<string, unknown> | undefined)?.dialogs,
+    record[schemaName],
+  ];
+  const direct = candidates.find(Array.isArray);
+  if (direct) return direct as AiDialogResult[];
+
+  // Some OpenAI-compatible routers add their own envelope around structured output.
+  // Find the first array that actually looks like dialog results without relying on its key.
+  const seen = new Set<unknown>();
+  const findNested = (value: unknown, depth: number): AiDialogResult[] => {
+    if (depth > 6 || value === null || typeof value !== "object" || seen.has(value)) return [];
+    seen.add(value);
+    if (Array.isArray(value)) {
+      if (value.some((item) => item && typeof item === "object" && "peerId" in item)) return value as AiDialogResult[];
+      for (const item of value) {
+        const found = findNested(item, depth + 1);
+        if (found.length) return found;
+      }
+      return [];
+    }
+    const nestedRecord = value as Record<string, unknown>;
+    if (typeof nestedRecord.peerId === "number") return [nestedRecord as AiDialogResult];
+    for (const child of Object.values(nestedRecord)) {
+      const found = findNested(child, depth + 1);
+      if (found.length) return found;
+    }
+    return [];
+  };
+  return findNested(parsed, 0);
+}
+
+function usageOf(payload: RouterPayload, model: string): Usage {
+  const inputTokens = Number(payload.usage?.input_tokens || payload.usage?.prompt_tokens || 0);
+  const outputTokens = Number(payload.usage?.output_tokens || payload.usage?.completion_tokens || 0);
+  const [inputPrice, outputPrice] = PRICES[model] || [0, 0];
   return {
     inputTokens,
     outputTokens,
@@ -50,69 +129,116 @@ function usageOf(payload: any): Usage {
   };
 }
 
-async function responses(input: unknown, schema: Record<string, unknown>, name: string, instructions: string, sessionApiKey?: string) {
-  const apiKey = sessionApiKey || process.env.OPENAI_API_KEY;
-  if (!apiKey) throw new Error("На сервере сайта не настроен OPENAI_API_KEY");
-  const response = await fetch("https://api.openai.com/v1/responses", {
-    method: "POST",
-    headers: { authorization: `Bearer ${apiKey}`, "content-type": "application/json" },
-    body: JSON.stringify({
-      model: MODEL,
-      store: false,
-      reasoning: { effort: "low" },
-      instructions,
-      input: JSON.stringify(input),
-      text: { verbosity: "low", format: { type: "json_schema", name, strict: true, schema } },
-      max_output_tokens: 8000,
-    }),
+async function routerChat(apiKey: string, model: string, input: unknown, instructions: string, timeoutMs: number) {
+  const body = JSON.stringify({
+    model,
+    messages: [
+      { role: "system", content: `${instructions} Верни только объект JSON с корневым массивом dialogs, без Markdown, заголовков и пояснений.` },
+      { role: "user", content: JSON.stringify(input) },
+    ],
+    response_format: { type: "json_object" },
+    temperature: 0,
+    max_tokens: 2000,
   });
-  const payload = await response.json() as any;
-  if (!response.ok) throw new Error(payload.error?.message || `Ошибка OpenAI (${response.status})`);
-  return { parsed: JSON.parse(extractText(payload)), usage: usageOf(payload), model: MODEL };
+  let lastError = "Router Cheap недоступен";
+  for (const baseUrl of ROUTER_BASE_URLS) {
+    try {
+      const response = await fetch(`${baseUrl}/chat/completions`, {
+        method: "POST",
+        headers: { authorization: `Bearer ${apiKey}`, "content-type": "application/json" },
+        body,
+        signal: AbortSignal.timeout(timeoutMs),
+      });
+      const responseText = await response.text();
+      let payload: RouterPayload;
+      try { payload = JSON.parse(responseText) as RouterPayload; } catch { payload = { error: { message: responseText.slice(0, 300) } }; }
+      if (!response.ok) {
+        lastError = payload.error?.message || `Ошибка Router Cheap (${response.status})`;
+        if (response.status >= 500) continue;
+        break;
+      }
+      return { parsed: parseStructuredText(extractText(payload)), usage: usageOf(payload, model), model };
+    } catch (error) {
+      lastError = error instanceof Error ? error.message : lastError;
+      if (error instanceof Error && (error.name === "TimeoutError" || error.name === "AbortError")) break;
+    }
+  }
+  throw new Error(lastError);
 }
 
-const dialogSchema = {
-  type: "object",
-  additionalProperties: false,
-  properties: {
-    dialogs: {
-      type: "array",
-      items: {
-        type: "object",
-        additionalProperties: false,
-        properties: {
-          peerId: { type: "integer" }, intent: { type: "string" }, goal: { type: "string" },
-          goalReached: { type: "boolean" }, status: { type: "string", enum: ["Успешно", "Риск", "Потерян", "Не лид"] },
-          objections: { type: "array", items: { type: "string" } }, score: { type: "integer", minimum: 0, maximum: 100 },
-          issue: { type: "string" }, nuance: { type: "string" }, recommendation: { type: "string" },
-          betterReply: { type: "string" }, confidence: { type: "integer", minimum: 0, maximum: 100 },
-        },
-        required: ["peerId", "intent", "goal", "goalReached", "status", "objections", "score", "issue", "nuance", "recommendation", "betterReply", "confidence"],
-      },
-    },
-  },
-  required: ["dialogs"],
-};
+function normalizeAiDialog(value: unknown, expectedIds: Set<number>): AiDialogResult | null {
+  if (!value || typeof value !== "object") return null;
+  const dialog = value as Record<string, unknown>;
+  const peerId = Number(dialog.peerId);
+  const score = Number(dialog.score);
+  const confidence = Number(dialog.confidence);
+  const status = dialog.status;
+  if (!expectedIds.has(peerId) || !["Успешно", "Риск", "Потерян", "Не лид"].includes(String(status)) ||
+    typeof dialog.goalReached !== "boolean" || !Number.isFinite(score) || !Number.isFinite(confidence)) return null;
+  return {
+    peerId, status: status as AiDialogResult["status"], goalReached: dialog.goalReached,
+    score: Math.max(0, Math.min(100, score)), confidence: Math.max(0, Math.min(100, confidence)),
+    intent: String(dialog.intent || ""), goal: String(dialog.goal || ""),
+    objections: Array.isArray(dialog.objections) ? dialog.objections.map(String) : [],
+    issue: String(dialog.issue || ""), nuance: String(dialog.nuance || ""),
+    recommendation: String(dialog.recommendation || ""), betterReply: String(dialog.betterReply || ""),
+  };
+}
 
-export async function analyzeDialogsWithAi(dialogs: DialogForAi[], sessionApiKey?: string) {
+export async function analyzeDialogsWithAi(dialogs: DialogForAi[], sessionApiKey?: string, preferredModel?: string) {
   const all: AiDialogResult[] = [];
   let usage: Usage = { inputTokens: 0, outputTokens: 0, totalTokens: 0, estimatedCostUsd: 0 };
-  for (let index = 0; index < dialogs.length; index += 8) {
-    const part = dialogs.slice(index, index + 8);
-    const result = await responses(part, dialogSchema, "vk_dialog_analysis", [
-      "Ты старший руководитель отдела продаж. Анализируй каждый диалог по смыслу и контексту, а не по ключевым словам.",
-      "Самостоятельно определи намерение клиента, фактическое целевое действие бизнеса и достигнуто ли оно.",
-      "Подмечай скрытые сомнения, слабые ответы, отсутствие инициативы, пропущенные вопросы и момент потери клиента.",
-      "Не выдумывай факты. Если переписка неоднозначна — снижай confidence. Ответы должны быть краткими и прикладными.",
-      "Персональные данные уже заменены маркерами. Не пытайся их восстановить.",
-    ].join(" "), sessionApiKey);
-    all.push(...(result.parsed.dialogs as AiDialogResult[]));
-    usage = {
-      inputTokens: usage.inputTokens + result.usage.inputTokens,
-      outputTokens: usage.outputTokens + result.usage.outputTokens,
-      totalTokens: usage.totalTokens + result.usage.totalTokens,
-      estimatedCostUsd: usage.estimatedCostUsd + result.usage.estimatedCostUsd,
-    };
+  let fallbackCount = 0;
+  const apiKey = sessionApiKey || process.env.OPENAI_API_KEY;
+  if (!apiKey) throw new Error("На сервере сайта не настроен API-ключ Router Cheap");
+  const models = preferredModel && MODEL_PRIORITY.includes(preferredModel)
+    ? [preferredModel, ...MODEL_PRIORITY.filter((model) => model !== preferredModel)]
+    : MODEL_PRIORITY;
+  const usedModels = new Set<string>();
+  for (let index = 0; index < dialogs.length; index += 3) {
+    const part = dialogs.slice(index, index + 3).map((dialog) => ({
+      ...dialog,
+      transcript: dialog.transcript.split("\n").slice(-18).map((line) => line.slice(0, 500)).join("\n"),
+    }));
+    const completed = new Map<number, AiDialogResult>();
+    for (const model of models.slice(0, 3)) {
+      const remaining = part.filter((dialog) => !completed.has(dialog.peerId));
+      if (!remaining.length) break;
+      try {
+        const result = await routerChat(apiKey, model, { dialogs: remaining }, [
+        "Ты старший руководитель отдела продаж. Анализируй каждый диалог по смыслу и контексту, а не по ключевым словам.",
+        "Контекст бизнеса: музей эмальерного искусства, выставки, экскурсии, мастер-классы и билеты.",
+        "Целевой интерес — намерение посетить, записаться, купить билет или мастер-класс. Цель достигнута только при подтверждённой записи, покупке или оплате. Переданный телефон оценивай отдельно и не считай достигнутой целью.",
+        "Подмечай скрытые сомнения, слабые ответы, отсутствие инициативы, пропущенные вопросы и момент потери клиента.",
+        "Не выдумывай факты. Если переписка неоднозначна — снижай confidence. Ответы должны быть краткими и прикладными.",
+        "Персональные данные уже заменены маркерами. Не пытайся их восстановить.",
+        "Для каждого входного peerId верни ровно один объект со всеми полями: peerId, intent, goal, goalReached, status, objections, score, issue, nuance, recommendation, betterReply, confidence.",
+      ].join(" "), 22_000);
+        const parsedDialogs = dialogsFromParsed(result.parsed);
+        const requestedIds = new Set(remaining.map((dialog) => dialog.peerId));
+        for (const item of parsedDialogs) {
+          const normalized = normalizeAiDialog(item, requestedIds);
+          if (normalized) completed.set(normalized.peerId, normalized);
+        }
+        if (completed.size) usedModels.add(result.model);
+        usage = {
+          inputTokens: usage.inputTokens + result.usage.inputTokens,
+          outputTokens: usage.outputTokens + result.usage.outputTokens,
+          totalTokens: usage.totalTokens + result.usage.totalTokens,
+          estimatedCostUsd: usage.estimatedCostUsd + result.usage.estimatedCostUsd,
+        };
+      } catch {
+        // Try the next currently available fast model.
+      }
+    }
+    all.push(...completed.values());
+    fallbackCount += part.length - completed.size;
   }
-  return { dialogs: all, usage, model: MODEL };
+  return {
+    dialogs: all,
+    usage,
+    model: usedModels.size ? [...usedModels].join(", ") : "резервный алгоритм",
+    analyzedCount: all.length,
+    fallbackCount,
+  };
 }

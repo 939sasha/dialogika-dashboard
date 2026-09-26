@@ -1,10 +1,15 @@
 "use client";
 
-import { ChangeEvent, useMemo, useState } from "react";
+import { ChangeEvent, useEffect, useMemo, useState } from "react";
+import { createClient, SupabaseClient, User } from "@supabase/supabase-js";
 
 type Period = "30" | "60" | "90";
 type Community = { id: number; name: string; photo: string | null };
-type LiveDialog = { peerId: number; score: number; status: string; issue: string; intent?: string; goal?: string; nuance?: string; recommendation?: string; betterReply?: string; confidence?: number; objections?: string[] };
+type StoredAnalysis = { stats: LiveStats; dialogs: LiveDialog[]; period: Period };
+type SavedCommunity = Community & { token: string; latestAnalysis?: StoredAnalysis | LiveStats | null };
+type SavedSenlerConnection = { communityId: number; name: string; photo: string | null; key: string };
+type LiveDialog = { peerId: number; adId?: string | null; score: number; status: string; issue: string; intent?: string; goal?: string; nuance?: string; recommendation?: string; betterReply?: string; confidence?: number; objections?: string[] };
+type AdStat = { adId: string; dialogs: number; leads: number; targets: number; lost: number; scoreSum: number; matched?: boolean; lookupUnavailable?: boolean; lookupReason?: string; matchType?: "banner" | "group" | "campaign"; adName?: string; groupId?: string; groupName?: string; campaignId?: string; campaignName?: string };
 type LiveStats = {
   dialogs: number; leads: number; contacts: number; targets: number; lost: number;
   averageResponse: number; recoverableLow: number; recoverableHigh: number;
@@ -13,23 +18,113 @@ type LiveStats = {
   objections: Array<{ key: string; label: string; count: number }>;
   objectionDialogs: number;
   dailyNew: Array<{ date: string; count: number }>;
+  ads: AdStat[];
   priority: "speed" | "objections" | "balanced";
-  ai: { model: string; inputTokens: number; outputTokens: number; totalTokens: number; estimatedCostUsd: number; nuances: string[]; recommendations: string[] };
+  ai: { model: string; analyzedCount: number; fallbackCount: number; inputTokens: number; outputTokens: number; totalTokens: number; estimatedCostUsd: number; nuances: string[]; recommendations: string[] };
 };
 
 export default function Home() {
+  const [supabase, setSupabase] = useState<SupabaseClient | null>(null);
+  const [user, setUser] = useState<User | null>(null);
+  const [accessToken, setAccessToken] = useState("");
+  const [authReady, setAuthReady] = useState(false);
   const [period, setPeriod] = useState<Period>("30");
   const [tab, setTab] = useState("Обзор");
   const [notice, setNotice] = useState("");
   const [query, setQuery] = useState("");
   const [token, setToken] = useState("");
   const [openaiKey, setOpenaiKey] = useState("");
+  const [senlerConnections, setSenlerConnections] = useState<SavedSenlerConnection[]>([]);
+  const [serverAds, setServerAds] = useState<AdStat[]>([]);
+  const [serverAdDialogTotal, setServerAdDialogTotal] = useState(0);
+  const [adCabinet, setAdCabinet] = useState<{ connected: boolean; accountId: string | null } | null>(null);
+  const [serverAdsStatus, setServerAdsStatus] = useState<"idle" | "loading" | "ready" | "error">("idle");
+  const [serverAdsError, setServerAdsError] = useState("");
   const [community, setCommunity] = useState<Community | null>(null);
+  const [connections, setConnections] = useState<SavedCommunity[]>([]);
   const [liveStats, setLiveStats] = useState<LiveStats | null>(null);
   const [liveDialogs, setLiveDialogs] = useState<LiveDialog[]>([]);
   const [busy, setBusy] = useState(false);
   const [reportBusy, setReportBusy] = useState(false);
   const [progress, setProgress] = useState({ processed: 0, total: 0 });
+  useEffect(() => {
+    let active = true;
+    queueMicrotask(() => { if (active && window.location.hash === "#ads") setTab("Объявления"); });
+    fetch("/api/auth/config").then((response) => response.json()).then(async (config: { url?: string; publishableKey?: string }) => {
+      if (!active || !config.url || !config.publishableKey) throw new Error("Авторизация не настроена");
+      const client = createClient(config.url, config.publishableKey);
+      setSupabase(client);
+      const { data } = await client.auth.getSession();
+      setUser(data.session?.user || null);
+      setAccessToken(data.session?.access_token || "");
+      setAuthReady(true);
+      client.auth.onAuthStateChange((_event, session) => {
+        setUser(session?.user || null);
+        setAccessToken(session?.access_token || "");
+      });
+    }).catch(() => { setNotice("Не удалось подключить авторизацию."); setAuthReady(true); });
+    return () => { active = false; };
+  }, []);
+  useEffect(() => {
+    if (!accessToken) return;
+    let cancelled = false;
+    (async () => {
+      const response = await fetch("/api/settings", { headers: { authorization: `Bearer ${accessToken}` } });
+      const result = await response.json() as { communities?: SavedCommunity[]; routerKey?: string; senlerConnections?: SavedSenlerConnection[]; error?: string };
+      if (!response.ok) throw new Error(result.error || "Не удалось загрузить подключения");
+      let saved = result.communities || [];
+      const local = JSON.parse(localStorage.getItem("dialogika.communities.v1") || "[]") as SavedCommunity[];
+      const localRouter = localStorage.getItem("dialogika.routerCheapKey.v1") || "";
+      if (!saved.length && local.length) {
+        for (const item of local.filter((entry) => entry?.id && entry?.token)) {
+          let latestAnalysis = item.latestAnalysis || null;
+          try {
+            const localAnalysis = localStorage.getItem(`dialogika.analysis.${item.id}.v1`);
+            if (localAnalysis) latestAnalysis = JSON.parse(localAnalysis) as LiveStats;
+          } catch {}
+          item.latestAnalysis = latestAnalysis;
+          await saveSetting({ kind: "vk", externalId: String(item.id), name: item.name, photo: item.photo, credential: item.token, latestAnalysis }, accessToken);
+          localStorage.removeItem(`dialogika.analysis.${item.id}.v1`);
+        }
+        saved = local;
+      }
+      if (!result.routerKey && localRouter) await saveSetting({ kind: "router", externalId: "default", credential: localRouter }, accessToken);
+      if (cancelled) return;
+      setConnections(saved);
+      setOpenaiKey(result.routerKey || localRouter);
+      setSenlerConnections(result.senlerConnections || []);
+      const activeId = Number(localStorage.getItem("dialogika.activeCommunity.v1"));
+      const selected = saved.find((item) => item.id === activeId) || saved[0];
+      if (selected) {
+        setCommunity({ id: selected.id, name: selected.name, photo: selected.photo });
+        setToken(selected.token);
+        restoreAnalysis(selected.latestAnalysis);
+      }
+      localStorage.removeItem("dialogika.communities.v1");
+      localStorage.removeItem("dialogika.routerCheapKey.v1");
+    })().catch((error) => setNotice(error instanceof Error ? error.message : "Ошибка загрузки подключений"));
+    return () => { cancelled = true; };
+  }, [accessToken]);
+  useEffect(() => {
+    if (tab !== "Объявления" || !accessToken || !community) return;
+    let cancelled = false;
+    queueMicrotask(() => { if (!cancelled) { setServerAds([]); setServerAdDialogTotal(0); setAdCabinet(null); setServerAdsStatus("loading"); setServerAdsError(""); } });
+    fetch(`/api/ads?communityId=${community.id}`, { headers: { authorization: `Bearer ${accessToken}` } })
+      .then(async (response) => {
+        const result = await response.json();
+        if (!response.ok) throw new Error(result.error || "Не удалось загрузить объявления");
+        return result;
+      })
+      .then((result: { ads?: AdStat[]; dialogs?: number; cabinet?: { connected: boolean; accountId: string | null } }) => {
+        if (cancelled) return;
+        setServerAds(Array.isArray(result.ads) ? result.ads : []);
+        setServerAdDialogTotal(Number(result.dialogs) || 0);
+        setAdCabinet(result.cabinet || null);
+        setServerAdsStatus("ready");
+      })
+      .catch((error) => { if (!cancelled) { setServerAdsError(error instanceof Error ? error.message : "Не удалось загрузить объявления"); setServerAdsStatus("error"); } });
+    return () => { cancelled = true; };
+  }, [tab, accessToken, community]);
   const data = liveStats ? {
     dialogs: liveStats.dialogs,
     leads: liveStats.leads,
@@ -65,9 +160,14 @@ export default function Home() {
       if (!response.ok || !result.community) throw new Error(result.error || "Не удалось подключить сообщество");
       setToken(value);
       setCommunity(result.community);
+      const savedConnection = { ...result.community, token: value };
+      const nextConnections = [...connections.filter((item) => item.id !== result.community!.id), savedConnection];
+      setConnections(nextConnections);
+      await saveSetting({ kind: "vk", externalId: String(result.community.id), name: result.community.name, photo: result.community.photo, credential: value }, accessToken);
+      localStorage.setItem("dialogika.activeCommunity.v1", String(result.community.id));
       setLiveStats(null);
       setLiveDialogs([]);
-      setNotice(`Подключено сообщество «${result.community.name}». Токен используется только в текущей сессии и не записывается в GitHub.`);
+      setNotice(`Подключено сообщество «${result.community.name}». Оно сохранено в вашем аккаунте и восстановится на любом устройстве.`);
       setTab("Обзор");
     } catch (error) {
       setNotice(error instanceof Error ? error.message : "Ошибка подключения");
@@ -80,20 +180,84 @@ export default function Home() {
     setBusy(true);
     setNotice("");
     try {
+      const normalizedKey = value.trim().replace(/^Bearer\s+/i, "").replace(/^["']|["']$/g, "").trim();
       const response = await fetch("/api/openai/check", {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ apiKey: value }),
+        body: JSON.stringify({ apiKey: normalizedKey }),
       });
       const result = await response.json() as { ok?: boolean; error?: string };
-      if (!response.ok || !result.ok) throw new Error(result.error || "Не удалось подключить OpenAI");
-      setOpenaiKey(value);
-      setNotice("OpenAI подключён. Ключ действует только в текущей вкладке и не сохраняется в GitHub или базе.");
+      if (!response.ok || !result.ok) throw new Error(result.error || "Не удалось подключить Router Cheap");
+      setOpenaiKey(normalizedKey);
+      await saveSetting({ kind: "router", externalId: "default", credential: normalizedKey }, accessToken);
+      setNotice("Router Cheap подключён. Ключ зашифрован и сохранён в вашем аккаунте.");
     } catch (error) {
-      setNotice(error instanceof Error ? error.message : "Ошибка подключения OpenAI");
+      setNotice(error instanceof Error ? error.message : "Ошибка подключения Router Cheap");
     } finally {
       setBusy(false);
     }
+  }
+
+  async function connectSenler(value: string, groupId: string) {
+    if (!community) { setNotice("Сначала выберите сообщество VK."); return; }
+    setBusy(true);
+    setNotice("");
+    try {
+      const normalizedKey = value.trim().replace(/^Bearer\s+/i, "").replace(/^["']|["']$/g, "").trim();
+      const response = await fetch("/api/senler/check", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ accessToken: normalizedKey, groupId: groupId.trim(), vkGroupId: String(community.id) }),
+      });
+      const result = await response.json() as { ok?: boolean; channel?: { name?: string; photo?: string }; error?: string };
+      if (!response.ok || !result.ok) throw new Error(result.error || "Не удалось подключить Senler");
+      const connection = { communityId: community.id, name: result.channel?.name || community.name, photo: result.channel?.photo || community.photo, key: normalizedKey };
+      await saveSetting({ kind: "senler", externalId: String(community.id), name: connection.name, photo: connection.photo, credential: JSON.stringify({ accessToken: normalizedKey, groupId: groupId.trim() }) }, accessToken);
+      setSenlerConnections((current) => [...current.filter((item) => item.communityId !== community.id), connection]);
+      setNotice(`Senler подключён к сообществу «${community.name}». Ключ зашифрован и сохранён в вашем аккаунте.`);
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : "Ошибка подключения Senler");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  function selectCommunity(item: SavedCommunity) {
+    setCommunity({ id: item.id, name: item.name, photo: item.photo });
+    setToken(item.token);
+    restoreAnalysis(item.latestAnalysis);
+    localStorage.setItem("dialogika.activeCommunity.v1", String(item.id));
+    setNotice(`Выбрано сообщество «${item.name}».`);
+  }
+
+  function restoreAnalysis(saved: SavedCommunity["latestAnalysis"]) {
+    if (!saved) { setLiveStats(null); setLiveDialogs([]); return; }
+    if ("stats" in saved) {
+      setLiveStats(saved.stats);
+      setLiveDialogs(saved.dialogs || []);
+      setPeriod(saved.period || "30");
+      return;
+    }
+    setLiveStats(saved);
+    setLiveDialogs([]);
+  }
+
+  async function disconnectCommunity() {
+    if (!community) return;
+    await deleteSetting("vk", String(community.id), accessToken);
+    const nextConnections = connections.filter((item) => item.id !== community.id);
+    setConnections(nextConnections);
+    const next = nextConnections[0];
+    if (next) {
+      selectCommunity(next);
+    } else {
+      setCommunity(null);
+      setToken("");
+      localStorage.removeItem("dialogika.activeCommunity.v1");
+    }
+    setLiveStats(null);
+    setLiveDialogs([]);
+    setNotice("Сообщество удалено из вашего аккаунта.");
   }
 
   async function runAnalysis() {
@@ -104,7 +268,7 @@ export default function Home() {
     }
     if (!openaiKey) {
       setTab("Настройки");
-      setNotice("Подключите OpenAI в разделе «Настройки», затем запустите анализ ещё раз.");
+      setNotice("Подключите Router Cheap в разделе «Настройки», затем запустите анализ ещё раз.");
       return;
     }
     setBusy(true);
@@ -116,65 +280,107 @@ export default function Home() {
       let offset = 0;
       let done = false;
       const totals = { dialogs: 0, leads: 0, contacts: 0, targets: 0, lost: 0, responseSum: 0, responseCount: 0, slowResponse: 0, noNextStep: 0, unanswered: 0 };
-      const goalTotals: Record<string, number> = {};
       const objectionTotals: Record<string, number> = {};
       const dailyTotals: Record<string, number> = {};
-      let goalLabels: Record<string, string> = {};
       let objectionLabels: Record<string, string> = {};
       let objectionDialogs = 0;
       const analyzedDialogs: LiveDialog[] = [];
-      const aiTotals = { model: "", inputTokens: 0, outputTokens: 0, totalTokens: 0, estimatedCostUsd: 0, nuances: [] as string[], recommendations: [] as string[] };
-      const aiGoalTotals: Record<string, number> = {};
-      while (!done) {
-        const response = await fetch("/api/vk/analyze", {
-          method: "POST",
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify({ token, openaiKey, groupId: community.id, days: Number(period), offset }),
-        });
-        const result = await response.json() as {
+      const adTotals: Record<string, AdStat> = {};
+      const aiTotals = { model: "", analyzedCount: 0, fallbackCount: 0, inputTokens: 0, outputTokens: 0, totalTokens: 0, estimatedCostUsd: 0, nuances: [] as string[], recommendations: [] as string[] };
+      const aiModels = new Set<string>();
+      let preferredModel = "";
+      let parallelPages = 1;
+      let totalAvailable: number | null = null;
+      const fetchPage = async (pageOffset: number, model: string) => {
+        let response: Response | null = null;
+        let responseText = "";
+        for (let attempt = 0; attempt < 2; attempt += 1) {
+          response = await fetch("/api/vk/analyze", {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({ token, openaiKey, senlerCredential: senlerConnections.find((item) => item.communityId === community.id)?.key || "", preferredModel: model, groupId: community.id, days: Number(period), offset: pageOffset }),
+          });
+          responseText = await response.text();
+          if (response.ok || response.status < 500 || response.status === 524 || attempt === 1) break;
+          setNotice(`Сервер задержал пачку. Повторная попытка ${attempt + 2} из 2…`);
+          await new Promise((resolve) => setTimeout(resolve, 1200 * (attempt + 1)));
+        }
+        if (!response) throw new Error("Сервер анализа не ответил");
+        let result: {
           stats?: { dialogs: number; leads: number; contacts: number; targets: number; lost: number; responseSum: number; responseCount: number };
           problems?: { slowResponse: number; noNextStep: number; unanswered: number };
           goalCounts?: Record<string, number>; goalLabels?: Record<string, string>;
           objectionCounts?: Record<string, number>; objectionLabels?: Record<string, string>;
           objectionDialogs?: number; dailyNew?: Record<string, number>;
-          ai?: { enabled: boolean; model: string; usage: { inputTokens: number; outputTokens: number; totalTokens: number; estimatedCostUsd: number }; goals: Record<string, number>; nuances: string[]; recommendations: string[] };
+          ads?: AdStat[];
+          ai?: { enabled: boolean; model: string; analyzedCount: number; fallbackCount: number; usage: { inputTokens: number; outputTokens: number; totalTokens: number; estimatedCostUsd: number }; goals: Record<string, number>; nuances: string[]; recommendations: string[] };
           dialogs?: LiveDialog[];
           done?: boolean; nextOffset?: number; totalConversations?: number; error?: string;
         };
+        try {
+          result = JSON.parse(responseText) as typeof result;
+        } catch {
+          const cloudflareCode = responseText.match(/error code:\s*(\d+)/i)?.[1];
+          throw new Error(cloudflareCode === "524"
+            ? "Сервер не успел обработать пачку диалогов. Повторите запуск — размер пачек уже уменьшен."
+            : `Сервер вернул некорректный ответ${response.status ? ` (${response.status})` : ""}.`);
+        }
         if (!response.ok || !result.stats) throw new Error(result.error || "Анализ не завершён");
-        totals.dialogs += result.stats.dialogs;
-        totals.leads += result.stats.leads;
-        totals.contacts += result.stats.contacts;
-        totals.targets += result.stats.targets;
-        totals.lost += result.stats.lost;
-        totals.responseSum += result.stats.responseSum;
-        totals.responseCount += result.stats.responseCount;
+        return result;
+      };
+      while (!done) {
+        const pageOffsets = Array.from({ length: parallelPages }, (_, index) => offset + index * 3)
+          .filter((pageOffset) => totalAvailable === null || pageOffset < totalAvailable);
+        const pageResults = await Promise.all(pageOffsets.map((pageOffset) => fetchPage(pageOffset, preferredModel)));
+        for (const result of pageResults) {
+          if (done) break;
+        const pageStats = result.stats;
+        if (!pageStats) throw new Error("Сервер вернул пачку без статистики");
+        totals.dialogs += pageStats.dialogs;
+        totals.leads += pageStats.leads;
+        totals.contacts += pageStats.contacts;
+        totals.targets += pageStats.targets;
+        totals.lost += pageStats.lost;
+        totals.responseSum += pageStats.responseSum;
+        totals.responseCount += pageStats.responseCount;
         totals.slowResponse += result.problems?.slowResponse || 0;
         totals.noNextStep += result.problems?.noNextStep || 0;
         totals.unanswered += result.problems?.unanswered || 0;
-        for (const [key, count] of Object.entries(result.goalCounts || {})) goalTotals[key] = (goalTotals[key] || 0) + count;
         for (const [key, count] of Object.entries(result.objectionCounts || {})) objectionTotals[key] = (objectionTotals[key] || 0) + count;
         for (const [date, count] of Object.entries(result.dailyNew || {})) dailyTotals[date] = (dailyTotals[date] || 0) + count;
-        goalLabels = result.goalLabels || goalLabels;
         objectionLabels = result.objectionLabels || objectionLabels;
         objectionDialogs += result.objectionDialogs || 0;
-        if (!result.ai?.enabled) throw new Error("ИИ-анализ не запущен: на сервере не подключён OpenAI API.");
+        for (const ad of result.ads || []) {
+          const current = adTotals[ad.adId] || { adId: ad.adId, dialogs: 0, leads: 0, targets: 0, lost: 0, scoreSum: 0 };
+          current.dialogs += ad.dialogs;
+          current.leads += ad.leads;
+          current.targets += ad.targets;
+          current.lost += ad.lost;
+          current.scoreSum += ad.scoreSum;
+          adTotals[ad.adId] = current;
+        }
+        if (!result.ai?.enabled) throw new Error("ИИ-анализ не запущен: не подключён API Router Cheap.");
+        if (result.ai.analyzedCount && result.ai.model !== "резервный алгоритм") preferredModel = result.ai.model.split(",")[0].trim();
         aiTotals.model = result.ai.model;
+        if (result.ai.model !== "резервный алгоритм") result.ai.model.split(",").forEach((model) => aiModels.add(model.trim()));
+        aiTotals.analyzedCount += result.ai.analyzedCount || 0;
+        aiTotals.fallbackCount += result.ai.fallbackCount || 0;
         aiTotals.inputTokens += result.ai.usage.inputTokens;
         aiTotals.outputTokens += result.ai.usage.outputTokens;
         aiTotals.totalTokens += result.ai.usage.totalTokens;
         aiTotals.estimatedCostUsd += result.ai.usage.estimatedCostUsd;
         aiTotals.nuances.push(...result.ai.nuances);
         aiTotals.recommendations.push(...result.ai.recommendations);
-        for (const [goal, count] of Object.entries(result.ai.goals)) aiGoalTotals[goal] = (aiGoalTotals[goal] || 0) + count;
         analyzedDialogs.push(...(result.dialogs || []));
         offset = result.nextOffset ?? offset;
         done = Boolean(result.done);
+        totalAvailable = result.totalConversations ?? totalAvailable;
         setProgress({ processed: totals.dialogs, total: result.totalConversations || 0 });
         setNotice(`Анализ продолжается: обработано ${totals.dialogs} диалогов за выбранный период…`);
+        }
+        parallelPages = 2;
       }
-      const goalKey = Object.entries(goalTotals).sort((a, b) => b[1] - a[1])[0]?.[0];
-      const aiGoal = Object.entries(aiGoalTotals).sort((a, b) => b[1] - a[1])[0]?.[0];
+      if (totals.dialogs > 0 && aiTotals.analyzedCount === 0) throw new Error("Router Cheap не обработал ни одного диалога. Предыдущий отчёт сохранён; проверьте ключ и статус моделей в настройках.");
       const recoverableLow = Math.round(totals.lost * 0.25);
       const recoverableHigh = Math.round(totals.lost * 0.55);
       const midpoint = (recoverableLow + recoverableHigh) / 2;
@@ -184,10 +390,10 @@ export default function Home() {
         : objectionDialogs > totals.slowResponse * 1.2
           ? "objections" as const
           : "balanced" as const;
-      setLiveStats({
+      const completedStats: LiveStats = {
         dialogs: totals.dialogs, leads: totals.leads, contacts: totals.contacts, targets: totals.targets,
         lost: totals.lost, averageResponse: totals.responseCount ? Math.round(totals.responseSum / totals.responseCount) : 0,
-        recoverableLow, recoverableHigh, goal: aiGoal || goalLabels[goalKey] || "Целевое действие",
+        recoverableLow, recoverableHigh, goal: "Запись или покупка",
         growth, slowResponse: totals.slowResponse, noNextStep: totals.noNextStep, unanswered: totals.unanswered,
         responseMeasured: totals.responseCount > 0,
         objections: Object.entries(objectionTotals)
@@ -196,13 +402,21 @@ export default function Home() {
           .sort((a, b) => b.count - a.count),
         objectionDialogs,
         dailyNew: Object.entries(dailyTotals).map(([date, count]) => ({ date, count })).sort((a, b) => a.date.localeCompare(b.date)),
+        ads: Object.values(adTotals).sort((a, b) => b.dialogs - a.dialogs),
         priority,
-        ai: { ...aiTotals, nuances: [...new Set(aiTotals.nuances)].slice(0, 6), recommendations: [...new Set(aiTotals.recommendations)].slice(0, 6) },
-      });
+        ai: { ...aiTotals, model: [...aiModels].join(", ") || "резервный алгоритм", nuances: [...new Set(aiTotals.nuances)].slice(0, 6), recommendations: [...new Set(aiTotals.recommendations)].slice(0, 6) },
+      };
+      setLiveStats(completedStats);
+      const storedAnalysis: StoredAnalysis = { stats: completedStats, dialogs: analyzedDialogs, period };
+      setConnections((current) => current.map((item) => item.id === community.id ? { ...item, latestAnalysis: storedAnalysis } : item));
+      await saveSetting({ kind: "vk", externalId: String(community.id), name: community.name, photo: community.photo, latestAnalysis: storedAnalysis }, accessToken);
       setLiveDialogs(analyzedDialogs);
-      setNotice(`Готово: ИИ проанализировал все ${totals.dialogs} активных диалогов за ${period} дней. Использовано ${aiTotals.totalTokens.toLocaleString("ru-RU")} токенов.`);
+      setNotice(aiTotals.fallbackCount
+        ? `Частичный анализ: ИИ обработал ${aiTotals.analyzedCount} из ${totals.dialogs} диалогов. Для ${aiTotals.fallbackCount} применены формальные признаки; эти выводы требуют проверки.`
+        : `Готово: ИИ обработал все ${totals.dialogs} активных диалогов за ${period} дней. Использовано ${aiTotals.totalTokens.toLocaleString("ru-RU")} токенов.`);
       setTab("Обзор");
     } catch (error) {
+      restoreAnalysis(connections.find((item) => item.id === community.id)?.latestAnalysis);
       setNotice(error instanceof Error ? error.message : "Ошибка анализа");
     } finally {
       setBusy(false);
@@ -232,20 +446,24 @@ export default function Home() {
     }
   }
 
+  if (!authReady) return <div className="authPage"><div className="authCard"><b>Загружаю Диалогику…</b></div></div>;
+  if (!user || !supabase) return <Login client={supabase} />;
+
   return (
     <main className="shell">
       <aside className="sidebar">
         <div className="brand"><span className="brandMark">Д</span><span>Диалогика</span></div>
         <nav aria-label="Основная навигация">
-          {["Обзор", "Диалоги", "Качество", "ИИ-бот", "Настройки"].map((item) => (
+          {["Обзор", "Объявления", "Диалоги", "Качество", "ИИ-бот", "Настройки"].map((item) => (
             <button key={item} onClick={() => setTab(item)} className={tab === item ? "navItem active" : "navItem"}>
-              <span className="navIcon">{item === "Обзор" ? "⌁" : item === "Диалоги" ? "◫" : item === "Качество" ? "◇" : item === "Настройки" ? "⚙" : "✦"}</span>{item}
+              <span className="navIcon">{item === "Обзор" ? "⌁" : item === "Объявления" ? "◎" : item === "Диалоги" ? "◫" : item === "Качество" ? "◇" : item === "Настройки" ? "⚙" : "✦"}</span>{item}
             </button>
           ))}
         </nav>
         <div className="sideBottom">
           <div className="community"><span className="communityIcon">VK</span><div><b>{community?.name || "Не подключено"}</b><small>{community ? "Сообщество подключено" : "Реальные данные не загружены"}</small></div><i className={community ? "" : "offline"}>●</i></div>
           <button onClick={() => setTab("Настройки")} className="navItem"><span className="navIcon">⚙</span>Настройки</button>
+          <button onClick={() => supabase.auth.signOut()} className="navItem"><span className="navIcon">↪</span>Выйти</button>
         </div>
       </aside>
 
@@ -265,7 +483,7 @@ export default function Home() {
           <div className="introRow">
             <div><h2>Что происходит в ваших диалогах</h2><p>{liveStats ? `Отчёт по сообществу «${community?.name}» за ${period} дней.` : "Здесь появятся только фактические результаты после полного анализа."}</p></div>
             <div className="period" aria-label="Период анализа">
-              {(["30", "60", "90"] as Period[]).map((p) => <button key={p} disabled={busy} onClick={() => { setPeriod(p); setLiveStats(null); }} className={period === p ? "selected" : ""}>{p} дней</button>)}
+              {(["30", "60", "90"] as Period[]).map((p) => <button key={p} disabled={busy} onClick={() => setPeriod(p)} className={period === p ? "selected" : ""}>{p} дней</button>)}
             </div>
           </div>
 
@@ -275,35 +493,35 @@ export default function Home() {
 
           {data && liveStats && <>
             <div className="metrics">
-              <Metric label="Диалоги за период" value={data.dialogs.toLocaleString("ru-RU")} hint="100% обработанной выборки" description="Уникальные переписки, в которых было хотя бы одно сообщение за выбранный период." />
-              <Metric label="Целевой интерес" value={data.leads.toLocaleString("ru-RU")} hint={`${pct(data.leads, data.dialogs)}% от диалогов`} description="Клиент обсуждал цену, товар, срок, макет, доставку или другое условие покупки." />
-              <Metric label="Получен телефон" value={data.contacts.toLocaleString("ru-RU")} hint={`${pct(data.contacts, data.leads)}% от целевых`} description="В переписке найден российский номер телефона. Это промежуточный, а не обязательный этап продажи." />
-              <Metric label={liveStats.goal} value={data.measurements.toLocaleString("ru-RU")} hint={`${pct(data.measurements, data.leads)}% от целевых`} description="Главное результативное действие определено автоматически по наиболее частому завершению успешных диалогов." />
+              <Metric label="Диалоги за период" value={data.dialogs.toLocaleString("ru-RU")} hint="переписки с сообщениями" description="Уникальные переписки, в которых было хотя бы одно сообщение за выбранный период." />
+              <Metric label="Интерес к посещению" value={data.leads.toLocaleString("ru-RU")} hint={`${pct(data.leads, data.dialogs)}% от диалогов`} description="Человек спрашивал о билетах, выставке, экскурсии, мастер-классе, цене или записи. Это ещё не покупка." />
+              <Metric label="Клиент оставил телефон" value={data.contacts.toLocaleString("ru-RU")} hint={`${pct(data.contacts, data.dialogs)}% от диалогов`} description="Телефон найден в сообщении клиента. Номер, написанный менеджером, не учитывается." />
+              <Metric label="Запись или покупка" value={data.measurements.toLocaleString("ru-RU")} hint={`${pct(data.measurements, data.leads)}% от заинтересованных`} description="В переписке подтверждена запись, покупка билета или оплата. Один лишь вопрос о цене сюда не входит." />
               <Metric label="Среднее время ответа" value={data.response} danger={liveStats.responseMeasured && liveStats.averageResponse > 300} hint={liveStats.responseMeasured ? "между вопросом и ответом" : "в периоде нет пар вопрос–ответ"} description="Среднее время от первого входящего сообщения клиента до следующего ответа сообщества." />
             </div>
 
             <div className="gridMain">
               <article className="card funnelCard">
-                <div className="cardHead"><div><p className="eyebrow">АВТОМАТИЧЕСКИ НАЙДЕННАЯ ЦЕЛЬ</p><h3>{liveStats.goal}</h3></div><span className="confidence">Определено по фактическим диалогам</span></div>
+                <div className="cardHead"><div><p className="eyebrow">ЭТАПЫ ДИАЛОГА</p><h3>От обращения до записи или покупки</h3></div><span className="confidence">По переписке, без данных о расходах</span></div>
                 <div className="funnel">
                   <FunnelRow label="Все диалоги за период" value={data.dialogs} max={data.dialogs} color="#231f20" />
-                  <FunnelRow label="Есть целевой интерес" value={data.leads} max={data.dialogs} color="#775cff" />
-                  <FunnelRow label="Передан номер телефона" value={data.contacts} max={data.dialogs} color="#a493ff" />
-                  <FunnelRow label={liveStats.goal} value={data.measurements} max={data.dialogs} color="#40b78a" />
+                  <FunnelRow label="Интерес к посещению" value={data.leads} max={data.dialogs} color="#775cff" />
+                  <FunnelRow label="Клиент оставил телефон" value={data.contacts} max={data.dialogs} color="#a493ff" />
+                  <FunnelRow label="Запись или покупка подтверждена" value={data.measurements} max={data.dialogs} color="#40b78a" />
                 </div>
-                <p className="funnelNote"><b>{data.lost} диалогов</b> имеют одновременно три признака: был коммерческий интерес, целевое действие не достигнуто, последнее сообщение осталось за клиентом. Из них ориентировочно <b>{liveStats.recoverableLow}–{liveStats.recoverableHigh}</b> можно было вернуть в работу.</p>
+                <p className="funnelNote"><b>{data.lost} диалогов</b> отмечены как потерянные: интерес был, подтверждённой записи или покупки нет. Статус определён ИИ или резервным алгоритмом и требует проверки человеком.</p>
               </article>
 
               <article className="card lossCard">
-                <p className="eyebrow">РАСЧЁТНЫЙ ПОТЕНЦИАЛ</p><div className="lossNumber">{liveStats.growth === null ? "н/д" : `+${liveStats.growth}%`}</div>
-                <h3>к текущим целевым действиям</h3>
-                <p>За счёт ответа до 5 минут, обязательного следующего шага и повторного касания.</p>
-                <div className="estimate"><span>Дополнительно</span><b>+{liveStats.recoverableLow}–{liveStats.recoverableHigh}</b></div>
-                <small>{liveStats.growth === null ? "Процент нельзя рассчитать: в периоде не найдено ни одного подтверждённого целевого действия." : "Формула: средняя точка диапазона возвращаемых заявок ÷ текущие целевые действия × 100%. Это сценарная оценка, не гарантия."}</small>
+                <p className="eyebrow">НАДЁЖНОСТЬ ОТЧЁТА</p><div className="lossNumber">{pct(liveStats.ai.analyzedCount ?? 0, liveStats.dialogs)}%</div>
+                <h3>диалогов разобрала нейросеть</h3>
+                <p>Остальные {liveStats.ai.fallbackCount ?? 0} оценены по формальным признакам. Их выводы нужно проверять вручную.</p>
+                <div className="estimate"><span>Нейросеть</span><b>{liveStats.ai.analyzedCount ?? 0} из {liveStats.dialogs}</b></div>
+                <small>Числа в отчёте показывают признаки из переписки, а не подтверждённые продажи в кассе.</small>
               </article>
             </div>
 
-            <div className="sectionHead"><div><p className="eyebrow">СРАВНЕНИЕ СЦЕНАРИЕВ</p><h2>Где теряются клиенты и что изменит оптимизация</h2></div></div>
+            <div className="sectionHead"><div><p className="eyebrow">ОБРАБОТКА ОБРАЩЕНИЙ</p><h2>Где диалоги требуют внимания</h2></div></div>
             <div className="chartGrid">
               <LossChart stats={liveStats} />
               <OptimizationChart stats={liveStats} />
@@ -320,7 +538,7 @@ export default function Home() {
               <article className="card aiInsight"><span>ЧТО ЗАМЕТИЛ ИИ</span>{liveStats.ai.nuances.map((item) => <p key={item}>✦ {item}</p>)}</article>
               <article className="card aiInsight recommendations"><span>ЧТО ИЗМЕНИТЬ</span>{liveStats.ai.recommendations.map((item) => <p key={item}>→ {item}</p>)}</article>
             </div>
-            <div className="aiUsage">ИИ-модель: <b>{liveStats.ai.model}</b> · использовано <b>{liveStats.ai.totalTokens.toLocaleString("ru-RU")}</b> токенов ({liveStats.ai.inputTokens.toLocaleString("ru-RU")} входных + {liveStats.ai.outputTokens.toLocaleString("ru-RU")} выходных) · ориентировочная стоимость <b>${liveStats.ai.estimatedCostUsd.toFixed(3)}</b>. Итоговое списание смотрите в кабинете OpenAI.</div>
+            <div className="aiUsage">ИИ-модель: <b>{liveStats.ai.model}</b> · нейросеть обработала <b>{(liveStats.ai.analyzedCount ?? 0).toLocaleString("ru-RU")}</b> диалогов{(liveStats.ai.fallbackCount ?? 0) > 0 ? ` · по формальным признакам: ${liveStats.ai.fallbackCount.toLocaleString("ru-RU")}` : ""} · в успешных ответах учтено <b>{liveStats.ai.totalTokens.toLocaleString("ru-RU")}</b> токенов. Фактическое списание, включая неудачные запросы, смотрите в кабинете Router Cheap.</div>
 
             <div className="sectionHead"><div><p className="eyebrow">ГЛАВНЫЕ ПРОБЛЕМЫ</p><h2>Что именно требует исправления</h2></div></div>
             <div className="problemGrid liveProblems">
@@ -332,32 +550,84 @@ export default function Home() {
           </>}
         </>}
 
+        {tab === "Объявления" && <AdsDashboard stats={liveStats} dialogs={liveDialogs} serverAds={serverAds} serverDialogTotal={serverAdDialogTotal} serverStatus={serverAdsStatus} serverError={serverAdsError} cabinet={adCabinet} onAnalyze={runAnalysis} />}
         {tab === "Диалоги" && <DialogsTable query={query} setQuery={setQuery} filteredDialogs={filteredDialogs} analyzed={Boolean(liveStats)} />}
         {tab === "Качество" && <Quality stats={liveStats} />}
         {tab === "ИИ-бот" && <Bot goal={liveStats?.goal} />}
-        {tab === "Настройки" && <Settings community={community} openaiConnected={Boolean(openaiKey)} busy={busy} onConnect={connectCommunity} onConnectOpenAI={connectOpenAI} onDisconnectOpenAI={() => { setOpenaiKey(""); setNotice("OpenAI отключён. Ключ удалён из текущей вкладки."); }} onDisconnect={() => { setCommunity(null); setToken(""); setLiveStats(null); setLiveDialogs([]); setNotice("Сообщество отключено. Токен удалён из текущей сессии."); }} />}
+        {tab === "Настройки" && <Settings community={community} connections={connections} openaiConnected={Boolean(openaiKey)} senlerConnected={Boolean(community && senlerConnections.some((item) => item.communityId === community.id))} busy={busy} onConnect={connectCommunity} onSelect={selectCommunity} onConnectOpenAI={connectOpenAI} onConnectSenler={connectSenler} onDisconnectOpenAI={async () => { await deleteSetting("router", "default", accessToken); setOpenaiKey(""); setNotice("Router Cheap отключён. Ключ удалён из вашего аккаунта."); }} onDisconnectSenler={async () => { if (!community) return; await deleteSetting("senler", String(community.id), accessToken); setSenlerConnections((current) => current.filter((item) => item.communityId !== community.id)); setNotice("Senler отключён. Ключ удалён из вашего аккаунта."); }} onDisconnect={disconnectCommunity} />}
       </section>
     </main>
   );
 }
 
-function Settings({ community, openaiConnected, busy, onConnect, onConnectOpenAI, onDisconnectOpenAI, onDisconnect }: { community: Community | null; openaiConnected: boolean; busy: boolean; onConnect: (token: string) => void; onConnectOpenAI: (key: string) => void; onDisconnectOpenAI: () => void; onDisconnect: () => void }) {
+async function saveSetting(values: Record<string, unknown>, accessToken: string) {
+  const response = await fetch("/api/settings", {
+    method: "PUT",
+    headers: { "content-type": "application/json", authorization: `Bearer ${accessToken}` },
+    body: JSON.stringify(values),
+  });
+  const result = await response.json() as { error?: string };
+  if (!response.ok) throw new Error(result.error || "Не удалось сохранить подключение");
+}
+
+async function deleteSetting(kind: "vk" | "router" | "senler", externalId: string, accessToken: string) {
+  const response = await fetch(`/api/settings?kind=${kind}&externalId=${encodeURIComponent(externalId)}`, {
+    method: "DELETE", headers: { authorization: `Bearer ${accessToken}` },
+  });
+  const result = await response.json() as { error?: string };
+  if (!response.ok) throw new Error(result.error || "Не удалось удалить подключение");
+}
+
+function Login({ client }: { client: SupabaseClient | null }) {
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
+  const [mode, setMode] = useState<"login" | "signup">("login");
+  const [message, setMessage] = useState("");
+  const [busy, setBusy] = useState(false);
+  async function submit(event: React.FormEvent) {
+    event.preventDefault();
+    if (!client) return setMessage("Авторизация временно недоступна");
+    setBusy(true); setMessage("");
+    const credentials = { email, password };
+    const { error } = mode === "login" ? await client.auth.signInWithPassword(credentials) : await client.auth.signUp(credentials);
+    setBusy(false);
+    if (error) setMessage(error.message);
+    else if (mode === "signup") setMessage("Проверьте почту и подтвердите регистрацию.");
+  }
+  return <main className="authPage"><section className="authCard">
+    <div className="brand authBrand"><span className="brandMark">Д</span><span>Диалогика</span></div>
+    <p className="eyebrow">ЕДИНЫЙ АККАУНТ</p><h1>{mode === "login" ? "Вход" : "Регистрация"}</h1>
+    <p className="authHint">Используйте тот же email и пароль, что и в VK Ads Dashboard.</p>
+    <form onSubmit={submit} className="authForm">
+      <label className="tokenLabel">Email<input type="email" value={email} onChange={(event) => setEmail(event.target.value)} required /></label>
+      <label className="tokenLabel">Пароль<input type="password" value={password} onChange={(event) => setPassword(event.target.value)} minLength={8} required /></label>
+      {message && <div className="authMessage">{message}</div>}
+      <button className="primary wide" disabled={busy}>{busy ? "Подождите…" : mode === "login" ? "Войти →" : "Создать аккаунт →"}</button>
+    </form>
+    <button className="authSwitch" onClick={() => { setMode(mode === "login" ? "signup" : "login"); setMessage(""); }}>{mode === "login" ? "Нет аккаунта? Регистрация" : "Уже есть аккаунт? Войти"}</button>
+  </section></main>;
+}
+
+function Settings({ community, connections, openaiConnected, senlerConnected, busy, onConnect, onSelect, onConnectOpenAI, onConnectSenler, onDisconnectOpenAI, onDisconnectSenler, onDisconnect }: { community: Community | null; connections: SavedCommunity[]; openaiConnected: boolean; senlerConnected: boolean; busy: boolean; onConnect: (token: string) => void; onSelect: (community: SavedCommunity) => void; onConnectOpenAI: (key: string) => void; onConnectSenler: (key: string, groupId: string) => void; onDisconnectOpenAI: () => void; onDisconnectSenler: () => void; onDisconnect: () => void }) {
   const [value, setValue] = useState("");
   const [aiValue, setAiValue] = useState("");
+  const [senlerValue, setSenlerValue] = useState("");
+  const [senlerGroupId, setSenlerGroupId] = useState("");
   return <div className="settingsPage">
     <div className="introRow"><div><h2>Подключение ВКонтакте</h2><p>Токен нужен для чтения истории сообщений от имени сообщества.</p></div></div>
     <div className="settingsGrid">
       <article className="card connectionCard">
         <div className="stepLabel">ШАГ 1 · ТОКЕН СООБЩЕСТВА</div>
-        <h3>{community ? "Сообщество подключено" : "Вставьте токен доступа"}</h3>
-        {community ? <>
-          <div className="connectedBox"><span className="communityIcon">VK</span><div><b>{community.name}</b><small>ID {community.id}</small></div><i>●</i></div>
-          <button className="dangerButton" onClick={onDisconnect}>Отключить сообщество</button>
-        </> : <>
-          <label className="tokenLabel">API-токен<input type="password" autoComplete="off" value={value} onChange={(e) => setValue(e.target.value)} placeholder="vk1.a.…" /></label>
-          <button className="primary wide" disabled={busy || value.length < 10} onClick={() => onConnect(value.trim())}>{busy ? "Проверяю доступ…" : "Проверить и подключить →"}</button>
-          <p className="securityNote">Токен передаётся по защищённому соединению, не сохраняется в браузере и не попадает в GitHub. После закрытия вкладки его нужно будет ввести снова.</p>
-        </>}
+        <h3>{connections.length ? "Подключённые сообщества" : "Вставьте токен доступа"}</h3>
+        {connections.length > 0 && <div className="connectedList">
+          {connections.map((item) => <button key={item.id} className={community?.id === item.id ? "connectedChoice active" : "connectedChoice"} onClick={() => onSelect(item)}>
+            <span className="communityIcon">VK</span><span><b>{item.name}</b><small>ID {item.id}</small></span><i>{community?.id === item.id ? "●" : "○"}</i>
+          </button>)}
+        </div>}
+        <label className="tokenLabel">{connections.length ? "Добавить ещё одно сообщество" : "API-токен"}<input type="password" autoComplete="off" value={value} onChange={(e) => setValue(e.target.value)} placeholder="vk1.a.…" /></label>
+        <button className="primary wide" disabled={busy || value.length < 10} onClick={() => onConnect(value.trim())}>{busy ? "Проверяю доступ…" : connections.length ? "Добавить сообщество →" : "Проверить и подключить →"}</button>
+        {community && <button className="dangerButton" onClick={onDisconnect}>Удалить выбранное сообщество</button>}
+        <p className="securityNote">Токен шифруется и сохраняется в вашем аккаунте. Подключение восстановится после входа с другого устройства. Данные не попадают в GitHub.</p>
       </article>
       <article className="card instructionCard">
         <div className="stepLabel">КАК ПОЛУЧИТЬ ТОКЕН</div>
@@ -365,19 +635,32 @@ function Settings({ community, openaiConnected, busy, onConnect, onConnectOpenAI
         <div className="warningBox"><b>Важно</b><span>Не отправляйте токен в сообщения и не добавляйте его в репозиторий. При подозрении на утечку удалите ключ в настройках VK.</span></div>
       </article>
       <article className="card connectionCard openaiCard">
-        <div className="stepLabel">ШАГ 2 · OPENAI</div>
-        <h3>{openaiConnected ? "OpenAI подключён" : "Подключите искусственный интеллект"}</h3>
+        <div className="stepLabel">ШАГ 2 · ROUTER CHEAP</div>
+        <h3>{openaiConnected ? "Router Cheap подключён" : "Подключите искусственный интеллект"}</h3>
         {openaiConnected ? <>
           <div className="connectedBox"><span className="openaiIcon">AI</span><div><b>Смысловой анализ активен</b><small>Намерения, цели, нюансы и рекомендации</small></div><i>●</i></div>
-          <button className="dangerButton" onClick={onDisconnectOpenAI}>Отключить OpenAI</button>
+          <button className="dangerButton" onClick={onDisconnectOpenAI}>Отключить Router Cheap</button>
         </> : <>
-          <label className="tokenLabel">API-ключ OpenAI<input type="password" autoComplete="off" value={aiValue} onChange={(e) => setAiValue(e.target.value)} placeholder="sk-…" /></label>
+          <label className="tokenLabel">API-ключ Router Cheap<input type="password" autoComplete="off" value={aiValue} onChange={(e) => setAiValue(e.target.value)} placeholder="Вставьте ключ из router.cheap" /></label>
           <button className="primary wide" disabled={busy || aiValue.length < 20} onClick={() => onConnectOpenAI(aiValue.trim())}>{busy ? "Проверяю ключ…" : "Проверить и подключить →"}</button>
-          <p className="securityNote">Ключ передаётся по HTTPS и хранится только в памяти текущей вкладки. После закрытия страницы его потребуется ввести снова. Он не записывается в GitHub, базу или отчёт.</p>
+          <p className="securityNote">Вставьте API-ключ из кабинета router.cheap — без слова Bearer и без кавычек. Ключ хранится в базе только в зашифрованном виде и доступен после входа в ваш аккаунт.</p>
+        </>}
+      </article>
+      <article className="card connectionCard">
+        <div className="stepLabel">ШАГ 3 · SENLER</div>
+        <h3>{senlerConnected ? "Senler подключён" : "Подключите Senler"}</h3>
+        {senlerConnected ? <>
+          <div className="connectedBox"><span className="openaiIcon">S</span><div><b>Источник рекламы подключён</b><small>{community?.name || "Выбранное сообщество"}</small></div><i>●</i></div>
+          <button className="dangerButton" onClick={onDisconnectSenler}>Отключить Senler</button>
+        </> : <>
+          <label className="tokenLabel">ID канала Senler<input type="text" inputMode="numeric" autoComplete="off" value={senlerGroupId} onChange={(e) => setSenlerGroupId(e.target.value.replace(/\D/g, ""))} placeholder="Например, 123456" /></label>
+          <label className="tokenLabel">API-ключ Senler<input type="password" autoComplete="off" value={senlerValue} onChange={(e) => setSenlerValue(e.target.value)} placeholder="Вставьте ключ из Senler" /></label>
+          <button className="primary wide" disabled={busy || !community || !senlerGroupId || senlerValue.length < 10} onClick={() => onConnectSenler(senlerValue.trim(), senlerGroupId)}>{busy ? "Проверяю ключ…" : "Проверить и подключить →"}</button>
+          <p className="securityNote">ID канала Senler — внутренний номер канала, а не ID сообщества VK. Его можно скопировать из адресной строки открытого канала в кабинете Senler. Ключ создаётся в Senler: Настройки → Работа с API. Оба значения сохраняются только в зашифрованном виде.</p>
         </>}
       </article>
     </div>
-    <article className="card privacyCard"><div><b>Что именно передаётся в ИИ</b><p>До 40 последних сообщений каждого диалога, время и роль отправителя. Телефоны, email, ссылки и VK ID предварительно заменяются обезличенными маркерами.</p></div><div><b>Текущий режим анализа</b><p>Скорость и объём считаются точным алгоритмом, а намерения, цели, качество ответа, нюансы и рекомендации определяет OpenAI. Ключ хранится только в защищённом окружении сервера.</p></div></article>
+    <article className="card privacyCard"><div><b>Что именно передаётся в ИИ</b><p>До 40 последних сообщений каждого диалога, время и роль отправителя. Телефоны, email, ссылки и VK ID предварительно заменяются обезличенными маркерами.</p></div><div><b>Текущий режим анализа</b><p>Скорость и объём считаются точным алгоритмом, а намерения, цели, качество ответа, нюансы и рекомендации определяет модель через Router Cheap. Ключ хранится в зашифрованном виде.</p></div></article>
   </div>;
 }
 
@@ -390,7 +673,7 @@ function EmptyState({ title, text, action, onClick }: { title: string; text: str
 }
 
 function Metric({ label, value, hint, danger, description }: { label: string; value: string; hint?: string; danger?: boolean; description: string }) {
-  return <article className="metric"><span>{label} <i className="infoTip" tabIndex={0}>?<em>{description}</em></i></span><strong className={danger ? "danger" : ""}>{value}</strong><small>{hint}</small></article>;
+  return <article className="metric"><span>{label}</span><strong className={danger ? "danger" : ""}>{value}</strong><small>{hint}</small><p className="metricDescription">{description}</p></article>;
 }
 
 function FunnelRow({ label, value, max, color }: { label: string; value: number; max: number; color: string }) {
@@ -408,8 +691,7 @@ function LossChart({ stats }: { stats: LiveStats }) {
 }
 
 function OptimizationChart({ stats }: { stats: LiveStats }) {
-  const optimized = stats.targets + Math.round((stats.recoverableLow + stats.recoverableHigh) / 2);
-  return <article className="card chartCard optimization"><div className="chartTitle"><div><span>ПОСЛЕ ОПТИМИЗАЦИИ</span><h3>Сценарий роста</h3></div><b>{stats.growth === null ? "н/д" : `+${stats.growth}%`}</b></div><div className="comparisonBars"><div><span>Сейчас</span><i><em style={{ width: `${pct(stats.targets, optimized)}%` }} /></i><b>{stats.targets}</b></div><div><span>После изменений</span><i><em style={{ width: "100%" }} /></i><b>{optimized}</b></div></div><ul><li>ответ на входящее сообщение до 5 минут;</li><li>следующий шаг в каждом целевом обращении;</li><li>повторное касание, если клиент замолчал.</li></ul><p>{stats.growth === null ? "Недостаточно подтверждённых целевых действий для процентного сравнения." : `Для сценария используется середина расчётного диапазона ${stats.recoverableLow}–${stats.recoverableHigh} возвращаемых заявок.`}</p></article>;
+  return <article className="card chartCard optimization"><div className="chartTitle"><div><span>ЧТО ПРОВЕРИТЬ</span><h3>Действия для команды</h3></div></div><ul><li>ответить на {stats.unanswered} сообщений, оставшихся без ответа;</li><li>проверить {stats.slowResponse} диалогов с ответом дольше 15 минут;</li><li>добавить следующий шаг в {stats.noNextStep} диалогах с интересом.</li></ul><p>Это количество диалогов с признаками риска. Рост продаж из него автоматически не следует.</p></article>;
 }
 
 function NewDialogsChart({ stats }: { stats: LiveStats }) {
@@ -448,7 +730,67 @@ function DialogsTable({ query, setQuery, filteredDialogs, analyzed }: { query: s
       <span><i className="legendRisk" /> <b>Риск</b> — интерес есть, цель не найдена</span>
       <span><i className="legendLost" /> <b>Потерян</b> — цель не найдена и последнее сообщение осталось без ответа</span>
     </div>
-    <div className="tableCard">{filteredDialogs.map((d) => <div className="dialogRow liveRow aiDialogRow" key={d.peerId}><span className="avatar">VK</span><div><b>Диалог #{d.peerId}</b><small>{d.intent || "Намерение не определено"}</small></div><span className={`badge ${d.status}`}>{d.status}</span><div><small>Оценка ИИ · уверенность {d.confidence || 0}%</small><b>{d.score}/100</b></div><div className="issueCell"><small>Вывод ИИ</small><b>{d.issue}</b><small>{d.nuance}</small></div><div className="aiAdvice"><small>Как улучшить</small><b>{d.recommendation}</b>{d.betterReply && <em>Пример ответа: «{d.betterReply}»</em>}</div></div>)}</div>
+    <div className="tableCard">{filteredDialogs.map((d) => <div className="dialogRow liveRow aiDialogRow" key={d.peerId}><span className="avatar">VK</span><div><b>Диалог #{d.peerId}</b><small>{d.adId ? `Рекламная метка: ${d.adId}` : d.intent || "Намерение не определено"}</small></div><span className={`badge ${d.status}`}>{d.status}</span><div><small>Оценка ИИ · уверенность {d.confidence || 0}%</small><b>{d.score}/100</b></div><div className="issueCell"><small>Вывод ИИ</small><b>{d.issue}</b><small>{d.nuance}</small></div><div className="aiAdvice"><small>Как улучшить</small><b>{d.recommendation}</b>{d.betterReply && <em>Пример ответа: «{d.betterReply}»</em>}</div></div>)}</div>
+  </div>;
+}
+
+function AdsDashboard({ stats, dialogs, serverAds, serverDialogTotal, serverStatus, serverError, cabinet, onAnalyze }: { stats: LiveStats | null; dialogs: LiveDialog[]; serverAds: AdStat[]; serverDialogTotal: number; serverStatus: "idle" | "loading" | "ready" | "error"; serverError: string; cabinet: { connected: boolean; accountId: string | null } | null; onAnalyze: () => void }) {
+  const derivedAds = dialogs.reduce<Record<string, AdStat>>((result, dialog) => {
+    if (!dialog.adId) return result;
+    const current = result[dialog.adId] || { adId: dialog.adId, dialogs: 0, leads: 0, targets: 0, lost: 0, scoreSum: 0 };
+    current.dialogs += 1;
+    current.leads += Number(dialog.status !== "Не лид");
+    current.targets += Number(dialog.status === "Успешно");
+    current.lost += Number(dialog.status === "Потерян");
+    current.scoreSum += dialog.score || 0;
+    result[dialog.adId] = current;
+    return result;
+  }, {});
+  const ads = serverStatus === "ready" ? serverAds : Array.isArray(stats?.ads) && stats.ads.length ? stats.ads : Object.values(derivedAds).sort((a, b) => b.dialogs - a.dialogs);
+  if (serverStatus === "loading" || serverStatus === "error" || serverStatus === "ready") return <div className="pageBlock adsPage">
+    <div className="introRow"><div><p className="eyebrow">АТРИБУЦИЯ VK РЕКЛАМЫ</p><h2>Какие источники привели обращения</h2><p>Метка берётся из переписки, затем сверяется с кабинетом «Эмалис». Метка может обозначать объявление, группу или кампанию.</p></div></div>
+    {serverStatus === "ready" && <div className="adDataState">{cabinet?.connected ? `Кабинет «Эмалис» подключён · ID ${cabinet.accountId}. Другие рекламные кабинеты к этому сервису пока не подключены.` : "Для выбранного сообщества рекламный кабинет VK Ads не подключён. Метки из переписок показаны без названий объявлений."}</div>}
+    {serverStatus === "loading" && <div className="adDataState">Загружаю статистику объявлений…</div>}
+    {serverStatus === "error" && <div className="adDataState error">Не удалось сверить источники: {serverError}. Сохранённые числа диалогов доступны ниже.</div>}
+    {serverStatus === "ready" && !ads.length && <div className="adDataState">В сохранённом отчёте нет рекламных источников.</div>}
+    {ads.length > 0 && serverStatus !== "loading" && <>
+      <div className="adDataState success">Загружено: {ads.length} рекламных меток · {ads.reduce((sum, ad) => sum + ad.dialogs, 0)} рекламных диалогов из {serverDialogTotal || stats?.dialogs || dialogs.length}</div>
+      {serverStatus === "ready" && <div className="adDataState">В кабинете подтверждено: {ads.filter((ad) => ad.matchType === "banner" || (ad.matched && !ad.matchType)).length} объявлений, {ads.filter((ad) => ad.matchType === "group").length} групп, {ads.filter((ad) => ad.matchType === "campaign").length} кампаний. Остальные значения остаются метками источника: точное объявление по ним определить нельзя.</div>}
+      <p className="adDefinitions">Диалоги — сколько переписок пришло с этой меткой. Интерес — человек спрашивал о посещении или покупке. Запись/покупка — подтверждённое действие в переписке. Потеряны — интерес без результата. Качество — оценка обработки диалога по шкале 0–100.</p>
+      <div className="simpleAdsTable">
+        <table><thead><tr><th>Источник / объявление VK</th><th>Диалоги</th><th>Интерес</th><th>Запись / покупка</th><th>Потеряны</th><th>Качество</th></tr></thead>
+        <tbody>{ads.map((ad) => { const quality = ad.dialogs ? Math.round(ad.scoreSum / ad.dialogs) : 0; return <tr key={ad.adId}><td className="adIdentity">{ad.matched ? <><b>{ad.matchType === "campaign" ? `Кампания «${ad.campaignName || ad.adId}»` : ad.matchType === "group" ? `Группа «${ad.groupName || ad.adId}»` : ad.adName || `Объявление #${ad.adId}`}</b><small>{ad.matchType === "campaign" ? `ID кампании: ${ad.adId} · Конкретное объявление неизвестно` : ad.matchType === "group" ? `ID группы: ${ad.adId} · Конкретное объявление неизвестно` : `ID объявления: ${ad.adId}`}{ad.groupName && ad.matchType !== "group" ? ` · Группа: ${ad.groupName}` : ""}{ad.campaignName && ad.matchType !== "campaign" ? ` · Кампания: ${ad.campaignName}` : ""}</small></> : <><b>Метка {ad.adId}</b><small>{serverStatus === "error" ? "Сверка с кабинетом сейчас недоступна" : ad.lookupUnavailable ? ad.lookupReason || "Кабинет VK Ads не ответил" : "ID не найден в подключённом кабинете «Эмалис». Это может быть REF/UTM или источник из другого кабинета."}</small></>}</td><td>{ad.dialogs}</td><td>{ad.leads} · {pct(ad.leads, ad.dialogs)}%</td><td>{ad.targets} · {pct(ad.targets, ad.dialogs)}%</td><td>{ad.lost} · {pct(ad.lost, ad.dialogs)}%</td><td><b>{quality}/100</b></td></tr>; })}</tbody></table>
+      </div>
+    </>}
+  </div>;
+  if (!stats && !ads.length) return <div className="pageBlock adsPage">
+    <div className="introRow"><div><p className="eyebrow">АТРИБУЦИЯ VK РЕКЛАМЫ</p><h2>Качество диалогов по объявлениям</h2><p>Так будет выглядеть отчёт после анализа. Источник определяется автоматически — без данных о расходах.</p></div><button className="primary" onClick={onAnalyze}>Запустить анализ →</button></div>
+    <div className="adPreviewNotice"><b>Нет отчёта</b><span>После анализа здесь появятся только найденные в переписках источники.</span></div>
+  </div>;
+  const adDialogs = ads.reduce((sum, ad) => sum + ad.dialogs, 0);
+  const adTargets = ads.reduce((sum, ad) => sum + ad.targets, 0);
+  const best = [...ads].filter((ad) => ad.dialogs >= 2).sort((a, b) => pct(b.targets, b.dialogs) - pct(a.targets, a.dialogs))[0];
+  const allDialogs = serverDialogTotal || stats?.dialogs || dialogs.length;
+  return <div className="pageBlock adsPage">
+    <div className="introRow"><div><p className="eyebrow">АТРИБУЦИЯ VK РЕКЛАМЫ</p><h2>Качество диалогов по объявлениям</h2><p>Источник определяется автоматически по данным первого сообщения. Расходы рекламного кабинета не используются.</p></div></div>
+    <div className="adSummary">
+      <Metric label="Источников найдено" value={String(ads.length)} hint="разных меток" description="Количество различных источников, переданных VK или Senler. Метка не всегда является ID конкретного объявления." />
+      <Metric label="Диалогов с меткой" value={adDialogs.toLocaleString("ru-RU")} hint={`${pct(adDialogs, allDialogs)}% от всех диалогов`} description="Переписки, для которых удалось получить рекламную или REF/UTM-метку." />
+      <Metric label="Записей и покупок" value={adTargets.toLocaleString("ru-RU")} hint={`${pct(adTargets, adDialogs)}% диалогов с меткой`} description="Диалоги с меткой, где в переписке найдена подтверждённая запись, покупка или оплата." />
+      <Metric label="Лучший источник" value={best ? `#${best.adId}` : "н/д"} hint={best ? `${pct(best.targets, best.dialogs)}% с результатом` : "нужно минимум 2 диалога"} description="Источник с наибольшей долей подтверждённых действий среди источников с двумя и более диалогами." />
+    </div>
+    {ads.length ? <div className="adsTable card">
+      <div className="adsHead"><span>Источник VK</span><span>Диалоги</span><span>Интерес</span><span>Запись / покупка</span><span>Потеряны</span><span>Качество</span></div>
+      {ads.map((ad) => {
+        const quality = ad.dialogs ? Math.round(ad.scoreSum / ad.dialogs) : 0;
+        return <div className="adsRow" key={ad.adId}>
+          <div><span className="adSource">Из VK Рекламы</span><b>#{ad.adId}</b></div><strong>{ad.dialogs}</strong>
+          <div><b>{ad.leads}</b><small>{pct(ad.leads, ad.dialogs)}%</small></div><div><b>{ad.targets}</b><small>{pct(ad.targets, ad.dialogs)}%</small></div>
+          <div className={ad.lost ? "adLost" : ""}><b>{ad.lost}</b><small>{pct(ad.lost, ad.dialogs)}%</small></div>
+          <div className="qualityCell"><b>{quality}/100</b><i><em style={{ width: `${quality}%` }} /></i></div>
+        </div>;
+      })}
+    </div> : <EmptyState title="Рекламные диалоги не найдены" text="В выбранном периоде VK не передал ни одного сообщения с источником vk_ads. Попробуйте период 60 или 90 дней." />}
   </div>;
 }
 

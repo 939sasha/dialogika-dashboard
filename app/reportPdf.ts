@@ -117,7 +117,6 @@ export function buildReportDefinition(data: PdfReportData): TDocumentDefinitions
   const response = data.responseMeasured
     ? data.averageResponse < 60 ? `${data.averageResponse} сек` : `${Math.round(data.averageResponse / 60)} мин`
     : "нет данных";
-  const optimized = data.targets + Math.round((data.recoverableLow + data.recoverableHigh) / 2);
   const dailyMax = Math.max(1, ...data.dailyNew.map((item) => item.count));
   const dailyPoints = data.dailyNew.map((item, index) => ({
     x: data.dailyNew.length > 1 ? index / (data.dailyNew.length - 1) * 480 : 240,
@@ -175,8 +174,8 @@ export function buildReportDefinition(data: PdfReportData): TDocumentDefinitions
       {
         columns: [
           kpi("ДИАЛОГИ", number(data.dialogs), "с активностью в периоде"),
-          kpi("ЦЕЛЕВОЙ ИНТЕРЕС", number(data.leads), `${pct(data.leads, data.dialogs)}% диалогов`),
-          kpi(data.goal.toUpperCase(), number(data.targets), `${pct(data.targets, data.leads)}% целевых`),
+          kpi("ИНТЕРЕС К ПОСЕЩЕНИЮ", number(data.leads), `${pct(data.leads, data.dialogs)}% диалогов`),
+          kpi("ЗАПИСЬ ИЛИ ПОКУПКА", number(data.targets), `${pct(data.targets, data.leads)}% заинтересованных`),
         ],
         columnGap: 10,
       },
@@ -187,7 +186,7 @@ export function buildReportDefinition(data: PdfReportData): TDocumentDefinitions
           body: [[{
             stack: [
               { text: `${number(data.lost)} диалогов имеют высокий риск потери.`, fontSize: 16, bold: true, color: orange },
-              { text: `Ориентировочно ${number(data.recoverableLow)}-${number(data.recoverableHigh)} из них можно было вернуть в работу при быстром ответе, обязательном следующем шаге и повторном касании.`, style: "lead", margin: [0, 8, 0, 0] },
+              { text: "Эти переписки стоит проверить вручную: статус определяется по сообщениям и не подтверждает фактический отказ клиента.", style: "lead", margin: [0, 8, 0, 0] },
             ],
             margin: [14, 12, 14, 12],
             fillColor: "#FFF2EF",
@@ -200,11 +199,11 @@ export function buildReportDefinition(data: PdfReportData): TDocumentDefinitions
 
       // Page 2
       pageBreak(),
-      title("Воронка", "Путь клиента к целевому действию", `Система определила наиболее характерную цель: «${data.goal}». Она выбирается по тематике и завершениям фактических диалогов, а не задаётся заранее.`),
+      title("Воронка", "От обращения до записи или покупки", "Этапы определены по сообщениям клиента и сообщества. Оплата вне переписки здесь не учитывается."),
       bar("Все диалоги за период", data.dialogs, data.dialogs, ink),
-      bar("Есть коммерческий интерес", data.leads, data.dialogs, purple),
-      bar("Получен номер телефона", data.contacts, data.dialogs, "#A493FF"),
-      bar(data.goal, data.targets, data.dialogs, green),
+      bar("Интерес к посещению", data.leads, data.dialogs, purple),
+      bar("Клиент оставил телефон", data.contacts, data.dialogs, "#A493FF"),
+      bar("Запись или покупка", data.targets, data.dialogs, green),
       { text: "Что означает каждая строка", style: "sectionTitle" },
       {
         table: {
@@ -212,9 +211,9 @@ export function buildReportDefinition(data: PdfReportData): TDocumentDefinitions
           body: [
             [{ text: "Показатель", style: "th" }, { text: "Определение", style: "th" }],
             ["Все диалоги", "Уникальные переписки хотя бы с одним сообщением в выбранном периоде."],
-            ["Коммерческий интерес", "Есть обсуждение товара, цены, срока, фото, макета, оплаты или доставки."],
-            ["Получен телефон", "В тексте найден российский номер. Для части продаж этот этап может быть необязательным."],
-            [data.goal, "Наиболее характерное результативное действие, найденное в переписках."],
+            ["Интерес к посещению", "Человек спрашивал о билете, выставке, экскурсии, мастер-классе, цене или записи."],
+            ["Клиент оставил телефон", "Российский номер найден в сообщении клиента. Номер менеджера не учитывается."],
+            ["Запись или покупка", "В переписке найдена подтверждённая запись, покупка билета или оплата."],
             ["Среднее время ответа", `${response}. Интервал от входящего сообщения до следующего ответа сообщества.`],
           ],
         },
@@ -317,23 +316,17 @@ export function buildReportDefinition(data: PdfReportData): TDocumentDefinitions
 
       // Page 5
       pageBreak(),
-      title("План действий", "Как реализовать потенциал роста", data.growth === null
-        ? "В периоде недостаточно подтверждённых целевых действий для процентного прогноза. Ниже приведён операционный план."
-        : `Расчётный сценарий составляет +${data.growth}% к текущему количеству целевых действий.`),
+      title("План действий", "Что проверить в работе с обращениями", "Ниже только наблюдаемые признаки из переписок и действия для команды. Прогноз продаж по ним не рассчитывается."),
       {
         columns: [
-          kpi("СЕЙЧАС", number(data.targets), data.goal),
-          kpi("ПОСЛЕ ОПТИМИЗАЦИИ", number(optimized), `середина прогноза +${Math.round((data.recoverableLow + data.recoverableHigh) / 2)}`),
-          kpi("ДИАПАЗОН", `${data.recoverableLow}-${data.recoverableHigh}`, "потенциально возвращаемых"),
+          kpi("ЗАПИСЬ ИЛИ ПОКУПКА", number(data.targets), "подтверждено в переписке"),
+          kpi("БЕЗ ОТВЕТА", number(data.unanswered), "последнее сообщение клиента"),
+          kpi("ДОЛГИЙ ОТВЕТ", number(data.slowResponse), "дольше 15 минут"),
         ],
         columnGap: 10,
       },
-      { text: "Как рассчитан прогноз", style: "sectionTitle" },
-      { text: data.growth === null
-        ? "Процент не рассчитывается, если в периоде не найдено подтверждённых целевых действий: деление на ноль дало бы некорректный результат."
-        : `Формула: средняя точка диапазона (${Math.round((data.recoverableLow + data.recoverableHigh) / 2)}) / текущие целевые действия (${data.targets}) × 100% = ${data.growth}%. Диапазон возвращаемых заявок составляет 25-55% от диалогов высокого риска.`,
-        style: "lead",
-      },
+      { text: "Как читать числа", style: "sectionTitle" },
+      { text: "Это признаки из сообщений, а не данные кассы или CRM. Одна переписка может входить сразу в несколько категорий риска.", style: "lead" },
       { text: "План на 30 дней", style: "sectionTitle" },
       {
         table: {

@@ -8,12 +8,15 @@
   "scripts": {
     "dev": "next dev",
     "build": "next build",
+    "build:cloudflare": "vinext build",
+    "deploy:cloudflare": "wrangler deploy --config wrangler.production.jsonc",
     "start": "next start",
     "test": "pnpm run build",
     "lint": "eslint . --ignore-pattern dist --ignore-pattern .next",
     "db:generate": "drizzle-kit generate"
   },
   "dependencies": {
+    "@supabase/supabase-js": "2.57.4",
     "drizzle-orm": "0.45.2",
     "next": "16.2.6",
     "pdfmake": "^0.2.20",

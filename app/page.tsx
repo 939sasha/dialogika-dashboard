@@ -335,7 +335,7 @@ export default function Home() {
     const reusable = previous && "stats" in previous && previous.version === 4 ? previous : null;
     const reusableDialogs = new Map<number, LiveDialog>();
     for (const dialog of reusable?.dialogs || []) {
-      if (dialog.revision && dialog.metrics) reusableDialogs.set(dialog.peerId, dialog);
+      if (dialog.revision && dialog.metrics && dialog.adId) reusableDialogs.set(dialog.peerId, dialog);
     }
     const knownRevisions = Object.fromEntries(
       [...reusableDialogs.values()].map((dialog) => [String(dialog.peerId), dialog.revision as string]),
@@ -493,7 +493,7 @@ export default function Home() {
       }
 
       const analyzedDialogs = [...dialogMap.values()]
-        .filter((dialog) => Boolean(dialog.metrics))
+        .filter((dialog) => Boolean(dialog.metrics && dialog.adId))
         .sort((a, b) => (b.lastMessageDate || 0) - (a.lastMessageDate || 0));
       const cutoff = Math.floor(Date.now() / 1000) - Number(period) * 86400;
       const totals = { dialogs: analyzedDialogs.length, leads: 0, contacts: 0, targets: 0, lost: 0, responseSum: 0, responseCount: 0, slowResponse: 0, noNextStep: 0, unanswered: 0 };
@@ -626,7 +626,7 @@ export default function Home() {
       } else if (incremental) {
         successMessage = "Готово: проверено " + totals.dialogs + " диалогов; " + reusedPeerIds.size + " использовано из кэша, " + changedPeerIds.size + " обновлено. В последнем запуске использовано " + aiUsage.totalTokens.toLocaleString("ru-RU") + " токенов.";
       } else {
-        successMessage = "Готово: ИИ обработал " + totalAiAnalyzed + " из " + totals.dialogs + " активных диалогов за " + period + " дней. Использовано " + aiUsage.totalTokens.toLocaleString("ru-RU") + " токенов.";
+        successMessage = "Готово: ИИ обработал " + totalAiAnalyzed + " из " + totals.dialogs + " рекламных диалогов за " + period + " дней. Использовано " + aiUsage.totalTokens.toLocaleString("ru-RU") + " токенов.";
       }
       if (newFallbackCount > 0) {
         successMessage += " Для " + newFallbackCount + " изменённых диалогов применены формальные признаки; эти выводы требуют проверки.";

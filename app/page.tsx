@@ -830,6 +830,8 @@ function Settings({ community, connections, openaiConnected, senlerConnected, bu
   const [aiValue, setAiValue] = useState("");
   const [senlerValue, setSenlerValue] = useState("");
   const [senlerGroupId, setSenlerGroupId] = useState("");
+  const selectedConnection = community ? connections.find((item) => item.id === community.id) : null;
+  const vkCredentialNeedsRecovery = selectedConnection?.credentialAvailable === false;
   return <div className="settingsPage">
     <div className="introRow"><div><h2>Подключение ВКонтакте</h2><p>Токен нужен для чтения истории сообщений от имени сообщества.</p></div></div>
     <div className="settingsGrid">
@@ -841,8 +843,9 @@ function Settings({ community, connections, openaiConnected, senlerConnected, bu
             <span className="communityIcon">VK</span><span><b>{item.name}</b><small>ID {item.id}{item.credentialAvailable === false ? " · токен требует восстановления" : ""}</small></span><i>{item.credentialAvailable === false ? "!" : community?.id === item.id ? "●" : "○"}</i>
           </button>)}
         </div>}
-        <label className="tokenLabel">{connections.length ? "Добавить ещё одно сообщество" : "API-токен"}<input type="password" autoComplete="off" value={value} onChange={(e) => setValue(e.target.value)} placeholder="vk1.a.…" /></label>
-        <button className="primary wide" disabled={busy || value.length < 10} onClick={() => onConnect(value.trim())}>{busy ? "Проверяю доступ…" : connections.length ? "Добавить сообщество →" : "Проверить и подключить →"}</button>
+        {vkCredentialNeedsRecovery && <div className="warningBox"><b>Нужно восстановить токен VK</b><span>Старое сообщество и отчёт сохранены. Вставьте новый или прежний токен этого же сообщества — после этого можно сразу открывать сообщения старых диалогов.</span></div>}
+        <label className="tokenLabel">{vkCredentialNeedsRecovery ? "Токен выбранного сообщества" : connections.length ? "Добавить ещё одно сообщество" : "API-токен"}<input type="password" autoComplete="off" value={value} onChange={(e) => setValue(e.target.value)} placeholder="vk1.a.…" /></label>
+        <button className="primary wide" disabled={busy || value.length < 10} onClick={() => onConnect(value.trim())}>{busy ? "Проверяю доступ…" : vkCredentialNeedsRecovery ? "Восстановить подключение →" : connections.length ? "Добавить сообщество →" : "Проверить и подключить →"}</button>
         {community && <button className="dangerButton" onClick={onDisconnect}>Удалить выбранное сообщество</button>}
         <p className="securityNote">Токен шифруется и сохраняется в вашем аккаунте. Подключение восстановится после входа с другого устройства. Данные не попадают в GitHub.</p>
       </article>

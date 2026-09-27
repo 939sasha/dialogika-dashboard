@@ -12,6 +12,7 @@ const GOALS = {
   order: { label: "Запись на посещение", signal: /(запис\w*|билет\w*|экскурс\w*|мастер.?класс\w*)/i, success: /(запис\w*\s+(?:подтвержд|оформл)|вас\s+записали|билет\w*\s+(?:куплен|оформлен|приобретен))/i },
   payment: { label: "Получение оплаты", signal: /(оплат\w*|чек|предоплат\w*|ссылк\w*\s+на\s+оплат)/i, success: /(оплатил\w*|оплата\s+(?:прошла|получена)|чек\s+об\s+оплате)/i },
 };
+const PURCHASE_SUCCESS_RE = /(билет\w*\s+(?:куплен|оформлен|приобретен)|оплатил\w*|оплата\s+(?:прошла|получена)|чек\s+об\s+оплате|покупк\w*\s+(?:оформлен|подтвержден|совершен))/i;
 const OBJECTIONS = {
   price: { label: "Высокая цена", re: /(дорог\w*|слишком\s+дорог|цена\s+высок|дешевле|скидк\w*|бюджет\w*)/i },
   distance: { label: "Доставка и расстояние", re: /(далеко|доставк\w*|пересыл\w*|другой\s+город|не\s+доставляете|самовывоз)/i },
@@ -193,6 +194,7 @@ function analyzeDialog(messages: VkMessage[]) {
     }
   }
   const hasPhone = PHONE_RE.test(clientText);
+  const purchaseConfirmed = PURCHASE_SUCCESS_RE.test(text);
   const hasGoal = Object.values(GOALS).some((goal) => goal.success.test(text));
   const hasInterest = INTEREST_RE.test(text) || inbound.length > 1;
   const last = chronological.at(-1);
@@ -204,7 +206,7 @@ function analyzeDialog(messages: VkMessage[]) {
   const poorNextStep = hasInterest && !hasGoal;
   const lost = unanswered && hasInterest && !hasGoal;
   const score = Math.max(20, 100 - (slow ? 25 : 0) - (unanswered ? 25 : 0) - (poorNextStep ? 20 : 0) - (!outbound.length ? 30 : 0));
-  return { hasPhone, hasGoal, hasInterest, lost, unanswered, slow, poorNextStep, averageResponse, responseSum: responseTimes.reduce((a, b) => a + b, 0), responseCount: responseTimes.length, score, goalCounts, objectionCounts };
+  return { hasPhone, purchaseConfirmed, hasGoal, hasInterest, lost, unanswered, slow, poorNextStep, averageResponse, responseSum: responseTimes.reduce((a, b) => a + b, 0), responseCount: responseTimes.length, score, goalCounts, objectionCounts };
 }
 
 export async function POST(request: Request) {
@@ -377,6 +379,7 @@ export async function POST(request: Request) {
           lastMessageId: row.lastMessageId,
           lastMessageDate: row.lastMessageDate,
           goalReached: ai?.goalReached ?? row.hasGoal,
+          purchase: row.purchaseConfirmed || Boolean(ai?.goalReached && /(покуп|оплат|билет|приобр)/i.test(`${ai.goal || ""} ${ai.issue || ""}`)),
           aiAnalyzed: Boolean(ai),
           aiModel: ai ? aiResult.model : "",
           metrics: {

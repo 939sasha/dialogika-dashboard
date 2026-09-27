@@ -145,7 +145,7 @@ async function routerChat(apiKey: string, model: string, input: unknown, instruc
     ],
     response_format: { type: "json_object" },
     temperature: 0,
-    max_tokens: 2000,
+    max_tokens: 3500,
   });
   let lastError = "Router Cheap недоступен";
   for (const baseUrl of ROUTER_BASE_URLS) {
@@ -184,7 +184,7 @@ function normalizeAiDialog(value: unknown, expectedIds: Set<number>): AiDialogRe
     typeof dialog.goalReached !== "boolean" || !Number.isFinite(score) || !Number.isFinite(confidence)) return null;
   return {
     peerId, status: status as AiDialogResult["status"], goalReached: dialog.goalReached,
-    score: Math.max(0, Math.min(100, score)), confidence: Math.max(0, Math.min(100, confidence)),
+    score: Math.max(0, Math.min(100, score)), confidence: Math.max(0, Math.min(100, confidence <= 1 ? confidence * 100 : confidence)),
     intent: String(dialog.intent || ""), goal: String(dialog.goal || ""),
     objections: Array.isArray(dialog.objections) ? dialog.objections.map(String) : [],
     issue: String(dialog.issue || ""), nuance: String(dialog.nuance || ""),
@@ -221,7 +221,7 @@ export async function analyzeDialogsWithAi(dialogs: DialogForAi[], sessionApiKey
         "Не выдумывай факты. Если переписка неоднозначна — снижай confidence. Ответы должны быть краткими и прикладными.",
         "Персональные данные уже заменены маркерами. Не пытайся их восстановить.",
         "Для каждого входного peerId верни ровно один объект со всеми полями: peerId, intent, goal, goalReached, status, objections, score, issue, nuance, recommendation, betterReply, confidence.",
-      ].join(" "), 22_000);
+      ].join(" "), 60_000);
         const parsedDialogs = dialogsFromParsed(result.parsed);
         const requestedIds = new Set(remaining.map((dialog) => dialog.peerId));
         for (const item of parsedDialogs) {

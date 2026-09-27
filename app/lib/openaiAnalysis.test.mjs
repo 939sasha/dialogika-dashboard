@@ -24,6 +24,15 @@ test("сохраняет частичный ответ и передаёт сл�
   assert.equal(analysis.usage.totalTokens, 300);
 });
 
+test("приводит уверенность модели из доли к процентам", async () => {
+  globalThis.fetch = async () => answer([1, 2, 3]);
+  const analysis = await analyzeDialogsWithAi(dialogs, "test-key");
+  assert.equal(analysis.dialogs[0].confidence, 80);
+  globalThis.fetch = async () => new Response(JSON.stringify({ choices: [{ message: { content: JSON.stringify({ dialogs: [{ ...result(1), confidence: 0.85 }] }) } }] }), { status: 200 });
+  const fractional = await analyzeDialogsWithAi([dialogs[0]], "test-key");
+  assert.equal(fractional.dialogs[0].confidence, 85);
+});
+
 test("не выдаёт резервный алгоритм за результат нейросети", async () => {
   globalThis.fetch = async () => new Response(JSON.stringify({ error: { message: "upstream unavailable" } }), { status: 503 });
   const analysis = await analyzeDialogsWithAi(dialogs, "test-key");

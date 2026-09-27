@@ -366,6 +366,7 @@ export default function Home() {
       const visitedOffsets = new Set<number>();
       let newAiAnalyzedCount = 0;
       let newFallbackCount = 0;
+      let aiFailureReason = "";
       const aiUsage = { inputTokens: 0, outputTokens: 0, totalTokens: 0, estimatedCostUsd: 0 };
 
       const fetchPage = async (pageOffset: number, model: string) => {
@@ -404,7 +405,7 @@ export default function Home() {
         let result: {
           stats?: { dialogs: number; leads: number; contacts: number; targets: number; lost: number; responseSum: number; responseCount: number };
           objectionLabels?: Record<string, string>;
-          ai?: { enabled: boolean; model: string; analyzedCount: number; fallbackCount: number; usage: { inputTokens: number; outputTokens: number; totalTokens: number; estimatedCostUsd: number } };
+          ai?: { enabled: boolean; model: string; analyzedCount: number; fallbackCount: number; failureReason?: string; usage: { inputTokens: number; outputTokens: number; totalTokens: number; estimatedCostUsd: number } };
           dialogs?: LiveDialog[];
           unchangedPeerIds?: number[];
           pageDialogs?: number;
@@ -465,6 +466,7 @@ export default function Home() {
           }
           newAiAnalyzedCount += result.ai.analyzedCount || 0;
           newFallbackCount += result.ai.fallbackCount || 0;
+          if (result.ai.failureReason) aiFailureReason = result.ai.failureReason;
           aiUsage.inputTokens += result.ai.usage.inputTokens || 0;
           aiUsage.outputTokens += result.ai.usage.outputTokens || 0;
           aiUsage.totalTokens += result.ai.usage.totalTokens || 0;
@@ -489,7 +491,7 @@ export default function Home() {
       }
 
       if (changedPeerIds.size > 0 && newAiAnalyzedCount === 0) {
-        throw new Error("Router Cheap не обработал ни одного изменённого диалога. Предыдущий отчёт сохранён; проверьте ключ и статус моделей в настройках.");
+        throw new Error(`Router Cheap не обработал рекламные диалоги: ${aiFailureReason || "проверьте доступ к моделям"}. Предыдущий отчёт сохранён.`);
       }
 
       const analyzedDialogs = [...dialogMap.values()]

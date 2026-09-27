@@ -1,3 +1,5 @@
+import { checkRouterModels } from "../../../lib/openaiAnalysis";
+
 const ROUTER_CHEAP_BASE_URL = "https://router.cheap/v1";
 
 function normalizeApiKey(value?: string) {
@@ -23,6 +25,10 @@ export async function POST(request: Request) {
         ? "Router Cheap не принял ключ. Скопируйте API-ключ из кабинета router.cheap целиком, без слова Bearer. Ключ OpenAI здесь не подойдёт."
         : providerMessage;
       return Response.json({ error }, { status: 400 });
+    }
+    const availability = await checkRouterModels(key);
+    if (!availability.ok) {
+      return Response.json({ error: availability.error || "Router Cheap не дал доступ к моделям" }, { status: 400 });
     }
     return Response.json({ ok: true, provider: "router.cheap" });
   } catch {

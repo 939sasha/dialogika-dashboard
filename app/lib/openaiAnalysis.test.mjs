@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { afterEach, test } from "node:test";
-import { analyzeDialogsWithAi } from "./openaiAnalysis.ts";
+import { analyzeDialogsWithAi, checkRouterModels } from "./openaiAnalysis.ts";
 
 const originalFetch = globalThis.fetch;
 afterEach(() => { globalThis.fetch = originalFetch; });
@@ -30,4 +30,12 @@ test("не выдаёт резервный алгоритм за результ�
   assert.equal(analysis.analyzedCount, 0);
   assert.equal(analysis.fallbackCount, 3);
   assert.equal(analysis.model, "резервный алгоритм");
+  assert.match(analysis.failureReason, /upstream unavailable/);
+});
+
+test("сообщает, когда ключ действителен, но маршрутизация моделей запрещена", async () => {
+  globalThis.fetch = async () => new Response(JSON.stringify({ error: { message: "Access to model deepseek-v4-flash is disabled. Enable automatic conversion in Routing or switch your balance type." } }), { status: 403 });
+  const check = await checkRouterModels("test-key");
+  assert.equal(check.ok, false);
+  assert.match(check.error, /Routing/);
 });

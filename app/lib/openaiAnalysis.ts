@@ -48,6 +48,13 @@ const PRICES: Record<string, [number, number]> = {
   "gpt-4o": [2.5, 10],
 };
 
+function readableRouterError(error: unknown) {
+  const message = error instanceof Error ? error.message : "Router Cheap не обработал запрос";
+  return /Access to model .* is disabled/i.test(message)
+    ? "В аккаунте Router Cheap закрыт доступ к моделям. В разделе Routing включите automatic conversion или смените тип баланса."
+    : message;
+}
+
 function extractText(payload: RouterPayload) {
   const chatContent = payload.choices?.[0]?.message?.content;
   if (typeof chatContent === "string") return chatContent;
@@ -189,6 +196,7 @@ export async function analyzeDialogsWithAi(dialogs: DialogForAi[], sessionApiKey
   const all: AiDialogResult[] = [];
   let usage: Usage = { inputTokens: 0, outputTokens: 0, totalTokens: 0, estimatedCostUsd: 0 };
   let fallbackCount = 0;
+  let failureReason = "";
   const apiKey = sessionApiKey || process.env.OPENAI_API_KEY;
   if (!apiKey) throw new Error("На сервере сайта не настроен API-ключ Router Cheap");
   const models = preferredModel && MODEL_PRIORITY.includes(preferredModel)
@@ -227,7 +235,8 @@ export async function analyzeDialogsWithAi(dialogs: DialogForAi[], sessionApiKey
           totalTokens: usage.totalTokens + result.usage.totalTokens,
           estimatedCostUsd: usage.estimatedCostUsd + result.usage.estimatedCostUsd,
         };
-      } catch {
+      } catch (error) {
+        if (!failureReason) failureReason = readableRouterError(error);
         // Try the next currently available fast model.
       }
     }
@@ -240,5 +249,21 @@ export async function analyzeDialogsWithAi(dialogs: DialogForAi[], sessionApiKey
     model: usedModels.size ? [...usedModels].join(", ") : "резервный алгоритм",
     analyzedCount: all.length,
     fallbackCount,
+    failureReason: all.length ? "" : failureReason,
   };
+}
+
+export async function checkRouterModels(apiKey: string) {
+  let failureReason = "Router Cheap не обработал проверочный запрос";
+  for (const model of MODEL_PRIORITY.slice(0, 3)) {
+    try {
+      await routerChat(apiKey, model, { check: true }, "Верни JSON {\"ok\":true}.", 8_000);
+      return { ok: true, model };
+    } catch (error) {
+      if (error instanceof Error && (/Access to model|Routing/i.test(error.message) || failureReason === "Router Cheap не обработал проверочный запрос")) {
+        failureReason = readableRouterError(error);
+      }
+    }
+  }
+  return { ok: false, error: failureReason };
 }

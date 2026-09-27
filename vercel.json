@@ -8,6 +8,9 @@
     },
     "app/api/ads/dialogs/route.ts": {
       "maxDuration": 120
+    },
+    "app/api/openai/check/route.ts": {
+      "maxDuration": 60
     }
   }
 }

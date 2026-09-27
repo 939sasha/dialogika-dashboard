@@ -49,3 +49,37 @@ test("не загружает историю и не вызывает ИИ дл�
   assert.equal(data.ai.analyzedCount, 0);
   assert.equal(calls.length, 1);
 });
+
+test("не анализирует переписку без рекламного источника", async () => {
+  const now = Math.floor(Date.now() / 1000);
+  const calls = [];
+  globalThis.fetch = async (input) => {
+    const url = new URL(String(input));
+    calls.push(url.pathname);
+    if (url.pathname.endsWith("/messages.getConversations")) {
+      return Response.json({ response: { count: 1, items: [{
+        conversation: { peer: { id: 101 } },
+        last_message: { id: 55, date: now, from_id: 101, peer_id: 101, out: 0, text: "Здравствуйте" },
+      }] } });
+    }
+    if (url.pathname.endsWith("/messages.getHistory")) {
+      return Response.json({ response: { count: 1, items: [
+        { id: 55, date: now, from_id: 101, peer_id: 101, out: 0, text: "Здравствуйте" },
+      ] } });
+    }
+    throw new Error("Unexpected request: " + url);
+  };
+
+  const response = await POST(new Request("https://dashboard.test/api/vk/analyze", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ token: "vk-token", openaiKey: "router-key", groupId: 109534321, days: 30 }),
+  }));
+  assert.equal(response.status, 200);
+  const data = await response.json();
+  assert.equal(data.pageDialogs, 1);
+  assert.equal(data.changedDialogs, 0);
+  assert.deepEqual(data.dialogs, []);
+  assert.equal(data.ai.analyzedCount, 0);
+  assert.equal(calls.length, 2);
+});

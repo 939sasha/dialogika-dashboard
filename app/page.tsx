@@ -960,6 +960,12 @@ function AdsDashboard({ stats, dialogs, serverAds, serverDialogTotal, serverStat
   const [detailError, setDetailError] = useState("");
   const [detailTotal, setDetailTotal] = useState(0);
   const [detailDialogs, setDetailDialogs] = useState<AdDialogDetail[]>([]);
+  const [detailLoadingMore, setDetailLoadingMore] = useState(false);
+  const [expandedPeerId, setExpandedPeerId] = useState<number | null>(null);
+  const [expandedMessages, setExpandedMessages] = useState<EvidenceMessage[]>([]);
+  const [expandedStatus, setExpandedStatus] = useState<"idle" | "loading" | "ready" | "error">("idle");
+  const [expandedError, setExpandedError] = useState("");
+  const [expandedTruncated, setExpandedTruncated] = useState(false);
 
   const purchaseOf = (dialog: LiveDialog) => dialog.purchase ?? (Boolean(dialog.goalReached ?? dialog.status === "Успешно") && /(покуп|оплат|билет|приобр)/i.test(`${dialog.goal || ""} ${dialog.issue || ""}`));
   const derivedAds = dialogs.reduce<Record<string, AdStat>>((result, dialog) => {
@@ -987,7 +993,7 @@ function AdsDashboard({ stats, dialogs, serverAds, serverDialogTotal, serverStat
 
   async function openAdDialogs(adId: string) {
     if (!communityId || !accessToken) return;
-    setSelectedAdId(adId); setDetailStatus("loading"); setDetailError(""); setDetailDialogs([]);
+    setSelectedAdId(adId); setDetailStatus("loading"); setDetailError(""); setDetailDialogs([]); setDetailTotal(0); setExpandedPeerId(null);
     try {
       const response = await fetch(`/api/ads/dialogs?communityId=${communityId}&adId=${encodeURIComponent(adId)}`, { headers: { authorization: `Bearer ${accessToken}` } });
       const result = await response.json() as { dialogs?: AdDialogDetail[]; total?: number; error?: string };
@@ -998,17 +1004,49 @@ function AdsDashboard({ stats, dialogs, serverAds, serverDialogTotal, serverStat
     }
   }
 
+  async function loadMoreDialogs() {
+    if (!communityId || !accessToken || !selectedAdId || detailLoadingMore) return;
+    setDetailLoadingMore(true);
+    try {
+      const response = await fetch(`/api/ads/dialogs?communityId=${communityId}&adId=${encodeURIComponent(selectedAdId)}&offset=${detailDialogs.length}`, { headers: { authorization: `Bearer ${accessToken}` } });
+      const result = await response.json() as { dialogs?: AdDialogDetail[]; total?: number; error?: string };
+      if (!response.ok) throw new Error(result.error || "Не удалось загрузить диалоги");
+      setDetailDialogs((current) => [...current, ...(result.dialogs || [])]);
+      setDetailTotal(result.total || 0);
+      setDetailError("");
+    } catch (error) {
+      setDetailError(error instanceof Error ? error.message : "Не удалось загрузить диалоги");
+    } finally {
+      setDetailLoadingMore(false);
+    }
+  }
+
+  async function openFullDialog(peerId: number) {
+    if (!communityId || !accessToken || !selectedAdId) return;
+    if (expandedPeerId === peerId) { setExpandedPeerId(null); return; }
+    setExpandedPeerId(peerId); setExpandedMessages([]); setExpandedStatus("loading"); setExpandedError("");
+    try {
+      const response = await fetch(`/api/ads/dialogs?communityId=${communityId}&adId=${encodeURIComponent(selectedAdId)}&peerId=${peerId}`, { headers: { authorization: `Bearer ${accessToken}` } });
+      const result = await response.json() as { messages?: EvidenceMessage[]; truncated?: boolean; error?: string };
+      if (!response.ok) throw new Error(result.error || "Не удалось загрузить переписку");
+      setExpandedMessages(result.messages || []); setExpandedTruncated(Boolean(result.truncated)); setExpandedStatus("ready");
+    } catch (error) {
+      setExpandedError(error instanceof Error ? error.message : "Не удалось загрузить переписку"); setExpandedStatus("error");
+    }
+  }
+
   const panel = selectedAdId && <div className="adDialogOverlay" onMouseDown={(e)=>{ if(e.currentTarget===e.target) setSelectedAdId(null); }}>
     <aside className="adDialogPanel">
-      <div className="adDialogPanelHead"><div><span>ПРОВЕРКА КЛАССИФИКАЦИИ</span><h3>{selectedAd ? sourceTitle(selectedAd) : selectedAdId}</h3><p>Последние сообщения из связанных переписок. Контактные данные обезличены.</p></div><button onClick={()=>setSelectedAdId(null)}>×</button></div>
+      <div className="adDialogPanelHead"><div><span>ПРОВЕРКА КЛАССИФИКАЦИИ</span><h3>{selectedAd ? sourceTitle(selectedAd) : selectedAdId}</h3><p>Откройте переписку, чтобы проверить вывод по сообщениям. Телефоны и ссылки скрыты.</p></div><button onClick={()=>setSelectedAdId(null)}>×</button></div>
       {detailStatus==="loading" && <div className="adDialogLoading">Загружаю фрагменты переписок из VK…</div>}
       {detailStatus==="error" && <div className="adDialogLoading error">{detailError}</div>}
       {detailStatus==="ready" && !detailDialogs.length && <div className="adDialogLoading">Связанные диалоги не найдены.</div>}
       {detailStatus==="ready" && detailDialogs.length>0 && <><div className="adDialogCount">Показано {detailDialogs.length} из {detailTotal} связанных диалогов</div><div className="adDialogList">{detailDialogs.map((d)=><article className="adDialogCard" key={d.peerId}>
-        <div className="adDialogMeta"><div><b>Диалог #{d.peerId}</b><small>{d.status} · качество {d.score}/100</small></div><div className="adDialogFlags"><span className={d.purchase == null ? "unknown" : d.purchase ? "yes" : "no"}>Покупка: {d.purchase == null ? "нет данных" : d.purchase ? "да" : "нет"}</span><span className={d.phone == null ? "unknown" : d.phone ? "yes" : "no"}>Телефон: {d.phone == null ? "нет данных" : d.phone ? "да" : "нет"}</span></div></div>
+        <div className="adDialogMeta"><div><b>Диалог #{d.peerId}</b><small>{d.status} · качество {d.score}/100</small></div><div className="adDialogFlags"><span className={d.purchase == null ? "unknown" : d.purchase ? "yes" : "no"}>Покупка по анализу: {d.purchase == null ? "нет данных" : d.purchase ? "да" : "нет"}</span><span className={d.phone == null ? "unknown" : d.phone ? "yes" : "no"}>Телефон по анализу: {d.phone == null ? "нет данных" : d.phone ? "да" : "нет"}</span></div></div>
         {(d.goal||d.issue)&&<div className="adDialogConclusion"><b>Классификация:</b> {[d.goal,d.issue].filter(Boolean).join(" · ")}</div>}
-        {d.messages.length > 0 ? <div className="adMessageList">{d.messages.map((m,i)=><div className={m.role==="Менеджер"?"adMessage manager":"adMessage client"} key={i}><div><b>{m.role}</b><small>{m.date}</small></div><p>{m.text}</p></div>)}</div> : <div className="adEvidenceMissing">Фрагмент переписки отсутствует в старом отчёте. Переподключите VK-токен один раз — после этого сообщения будут подтягиваться из VK, а новые анализы начнут сохранять обезличенные фрагменты автоматически.</div>}
-      </article>)}</div></>}
+        <button className="adDialogOpen" onClick={()=>openFullDialog(d.peerId)}>{expandedPeerId===d.peerId ? "Свернуть переписку" : "Показать переписку целиком →"}</button>
+        {expandedPeerId===d.peerId ? <>{expandedStatus==="loading" && <div className="adDialogLoading">Загружаю переписку из VK…</div>}{expandedStatus==="error" && <div className="adEvidenceMissing">{expandedError}</div>}{expandedStatus==="ready" && <>{expandedTruncated && <div className="adEvidenceMissing">Показаны последние 1000 сообщений. Более ранние сообщения не загружены.</div>}{expandedMessages.length ? <div className="adMessageList">{expandedMessages.map((m,i)=><div className={m.role==="Менеджер"?"adMessage manager":"adMessage client"} key={i}><div><b>{m.role}</b><small>{m.date}</small></div><p>{m.text}</p></div>)}</div> : <div className="adEvidenceMissing">В VK нет доступных сообщений этой переписки.</div>}</>}</> : d.messages.length > 0 ? <div className="adMessageList">{d.messages.map((m,i)=><div className={m.role==="Менеджер"?"adMessage manager":"adMessage client"} key={i}><div><b>{m.role}</b><small>{m.date}</small></div><p>{m.text}</p></div>)}</div> : <div className="adEvidenceMissing">Фрагмент отсутствует в сохранённом отчёте. Откройте переписку, чтобы загрузить её из VK.</div>}
+      </article>)}</div>{detailError && <div className="adDialogLoading error">{detailError}</div>}{detailDialogs.length < detailTotal && <button className="adDialogOpen" disabled={detailLoadingMore} onClick={loadMoreDialogs}>{detailLoadingMore ? "Загружаю…" : "Показать ещё диалоги"}</button>}</>}
     </aside>
   </div>;
 

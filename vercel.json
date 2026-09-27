@@ -5,6 +5,9 @@
   "functions": {
     "app/api/vk/analyze/route.ts": {
       "maxDuration": 300
+    },
+    "app/api/ads/dialogs/route.ts": {
+      "maxDuration": 120
     }
   }
 }

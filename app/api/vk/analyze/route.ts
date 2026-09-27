@@ -6,6 +6,7 @@ const VK_VERSION = "5.199";
 // The browser continues with the next page and updates visible progress after every batch.
 const BATCH_SIZE = 3;
 const PHONE_RE = /(?:\+?7|8)[\s\-()]?\d{3}[\s\-()]?\d{3}[\s\-]?\d{2}[\s\-]?\d{2}/;
+const PHONE_GLOBAL_RE = /(?:\+?7|8)[\s\-()]?\d{3}[\s\-()]?\d{3}[\s\-]?\d{2}[\s\-]?\d{2}/g;
 const INTEREST_RE = /(цен|стоим|сколько|билет|посет|запис|экскурс|выстав|мастер.?класс|расписан|места|оплат)\w*/i;
 
 const GOALS = {
@@ -36,7 +37,7 @@ type SenlerSubscriber = {
 
 function sanitizeMessageText(value?: string) {
   return (value || "[вложение]")
-    .replace(PHONE_RE, "[ТЕЛЕФОН]")
+    .replace(PHONE_GLOBAL_RE, "[ТЕЛЕФОН]")
     .replace(/[\w.+-]+@[\w.-]+\.[a-z]{2,}/gi, "[EMAIL]")
     .replace(/https?:\/\/\S+/gi, "[ССЫЛКА]")
     .replace(/\b(?:id|club)\d+\b/gi, "[VK_ID]")
@@ -312,10 +313,11 @@ export async function POST(request: Request) {
         ...analyzeDialog(history.messages),
       } satisfies AnalysisRow;
     }));
-    const rows = rawRows.filter((row): row is AnalysisRow => row !== null);
+    const attributedRows = rawRows.filter((row): row is AnalysisRow => row !== null);
 
-    const senlerAds = await getSenlerAds(parseSenlerCredential(senlerCredential), rows.map((row) => row.peerId));
-    for (const row of rows) if (!row.adId) row.adId = senlerAds.get(row.peerId) || null;
+    const senlerAds = await getSenlerAds(parseSenlerCredential(senlerCredential), attributedRows.map((row) => row.peerId));
+    for (const row of attributedRows) if (!row.adId) row.adId = senlerAds.get(row.peerId) || null;
+    const rows = attributedRows.filter((row) => Boolean(row.adId));
 
     const aiResult = rows.length
       ? await analyzeDialogsWithAi(rows.map((row) => ({

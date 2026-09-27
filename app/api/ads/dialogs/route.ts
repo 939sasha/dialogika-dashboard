@@ -3,7 +3,7 @@ import { publicSupabaseConfig } from "../../../lib/supabaseConfig";
 
 const VK_API = "https://api.vk.com/method";
 const VK_VERSION = "5.199";
-const PHONE_RE = /(?:\+?7|8)[\s\-()]?\d{3}[\s\-()]?\d{3}[\s\-]?\d{2}[\s\-]?\d{2}/;
+const PHONE_GLOBAL_RE = /(?:\+?7|8)[\s\-()]?\d{3}[\s\-()]?\d{3}[\s\-]?\d{2}[\s\-]?\d{2}/g;
 
 type StoredDialog = {
   peerId?: number;
@@ -20,14 +20,14 @@ type StoredDialog = {
 
 type VkMessage = { id?: number; date?: number; out?: number; text?: string };
 
-async function vkHistory(token: string, groupId: string, peerId: number) {
+async function vkHistory(token: string, groupId: string, peerId: number, count = 8, offset = 0) {
   const body = new URLSearchParams({
     access_token: token,
     v: VK_VERSION,
     group_id: groupId,
     peer_id: String(peerId),
-    count: "8",
-    offset: "0",
+    count: String(count),
+    offset: String(offset),
   });
   const response = await fetch(`${VK_API}/messages.getHistory`, {
     method: "POST",
@@ -42,7 +42,7 @@ async function vkHistory(token: string, groupId: string, peerId: number) {
 
 function sanitize(text: string) {
   return (text || "[вложение]")
-    .replace(PHONE_RE, "[ТЕЛЕФОН]")
+    .replace(PHONE_GLOBAL_RE, "[ТЕЛЕФОН]")
     .replace(/[\w.+-]+@[\w.-]+\.[a-z]{2,}/gi, "[EMAIL]")
     .replace(/https?:\/\/\S+/gi, "[ССЫЛКА]")
     .replace(/\b(?:id|club)\d+\b/gi, "[VK_ID]");
@@ -58,8 +58,13 @@ export async function GET(request: Request) {
   const requestUrl = new URL(request.url);
   const communityId = requestUrl.searchParams.get("communityId");
   const adId = requestUrl.searchParams.get("adId");
+  const peerId = requestUrl.searchParams.get("peerId");
+  const offset = Number(requestUrl.searchParams.get("offset") || 0);
   if (!authToken || !communityId || !adId) {
     return Response.json({ error: "Требуется вход" }, { status: 401 });
+  }
+  if (!Number.isSafeInteger(offset) || offset < 0 || (peerId && (!Number.isSafeInteger(Number(peerId)) || Number(peerId) <= 0))) {
+    return Response.json({ error: "Некорректные параметры" }, { status: 400 });
   }
 
   const client = createClient(supabaseUrl, key, {
@@ -78,12 +83,42 @@ export async function GET(request: Request) {
   if (error) return Response.json({ error: error.message }, { status: 500 });
   const analysis = data?.latest_analysis as { dialogs?: StoredDialog[] } | null;
   const matched = (analysis?.dialogs || []).filter((dialog) => String(dialog.adId || "") === adId && dialog.peerId);
+  if (peerId) {
+    const dialog = matched.find((item) => String(item.peerId) === peerId);
+    if (!dialog) return Response.json({ error: "Диалог не найден в этом источнике" }, { status: 404 });
+    const { data: credential, error: credentialError } = await client.rpc("dialogika_get_credential", {
+      p_kind: "vk",
+      p_external_id: communityId,
+    });
+    if (credentialError || typeof credential !== "string" || !credential) {
+      return Response.json({ error: "История VK недоступна. Проверьте подключение сообщества." }, { status: 503 });
+    }
+    try {
+      const history: VkMessage[] = [];
+      for (let page = 0; page < 5; page += 1) {
+        const batch = await vkHistory(credential, communityId, Number(peerId), 200, page * 200);
+        history.push(...batch);
+        if (batch.length < 200) break;
+      }
+      return Response.json({
+        messages: history.sort((a, b) => Number(a.date || 0) - Number(b.date || 0)).map((message) => ({
+          role: message.out ? "Менеджер" : "Клиент",
+          text: sanitize(message.text || "[вложение]"),
+          date: message.date ? new Intl.DateTimeFormat("ru-RU", { day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit", timeZone: "Europe/Moscow" }).format(new Date(message.date * 1000)) : "",
+        })),
+        truncated: history.length >= 1000,
+      });
+    } catch {
+      return Response.json({ error: "VK не вернул историю переписки" }, { status: 502 });
+    }
+  }
+
   const sorted = [...matched].sort((a, b) =>
     Number(purchaseOf(b)) - Number(purchaseOf(a)) ||
     Number(Boolean(b.metrics?.hasPhone)) - Number(Boolean(a.metrics?.hasPhone)) ||
     Number(b.score || 0) - Number(a.score || 0)
   );
-  const selected = sorted.slice(0, 8);
+  const selected = sorted.slice(offset, offset + 8);
   if (!selected.length) return Response.json({ dialogs: [], total: matched.length });
 
   const needsLiveHistory = selected.some((dialog) => !dialog.evidence?.length);

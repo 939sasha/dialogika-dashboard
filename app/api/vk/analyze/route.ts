@@ -40,7 +40,7 @@ function sanitizeMessageText(value?: string) {
     .replace(/[\w.+-]+@[\w.-]+\.[a-z]{2,}/gi, "[EMAIL]")
     .replace(/https?:\/\/\S+/gi, "[ССЫЛКА]")
     .replace(/\b(?:id|club)\d+\b/gi, "[VK_ID]")
-    .slice(0, 500);
+    .slice(0, 350);
 }
 
 function sanitizedTranscript(messages: VkMessage[]) {
@@ -72,11 +72,11 @@ function evidenceMessages(messages: VkMessage[]) {
     selected.add(index);
     if (index + 1 < chronological.length) selected.add(index + 1);
   }
-  for (let index = chronological.length - 1; index >= 0 && selected.size < 6; index -= 1) selected.add(index);
+  for (let index = chronological.length - 1; index >= 0 && selected.size < 4; index -= 1) selected.add(index);
 
   return [...selected]
     .sort((a, b) => a - b)
-    .slice(-6)
+    .slice(-4)
     .map((index) => {
       const message = chronological[index];
       return {

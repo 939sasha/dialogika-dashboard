@@ -1,7 +1,7 @@
 import { createClient } from "@supabase/supabase-js";
 import { publicSupabaseConfig } from "../../lib/supabaseConfig";
 
-type AdStat = { adId: string; dialogs: number; leads: number; targets: number; purchases?: number; phones?: number; lost: number; scoreSum: number; matched?: boolean; lookupUnavailable?: boolean; lookupReason?: string; matchType?: "banner" | "group" | "campaign"; adName?: string; groupId?: string; groupName?: string; campaignId?: string; campaignName?: string };
+type AdStat = { adId: string; dialogs: number; leads: number; targets: number; purchases?: number | null; phones?: number | null; lost: number; scoreSum: number; matched?: boolean; lookupUnavailable?: boolean; lookupReason?: string; matchType?: "banner" | "group" | "campaign"; adName?: string; groupId?: string; groupName?: string; campaignId?: string; campaignName?: string };
 type AnalysisDialog = { adId?: string | null; purchase?: boolean; goalReached?: boolean; goal?: string; issue?: string; metrics?: { hasPhone?: boolean } };
 type VkEntity = { id?: number | string; name?: string; campaign_id?: number | string; ad_group_id?: number | string; ad_plan_id?: number | string };
 
@@ -101,19 +101,31 @@ export async function GET(request: Request) {
   if (error) return Response.json({ error: error.message }, { status: 500 });
   const analysis = data?.latest_analysis as { stats?: { dialogs?: number; ads?: AdStat[] }; dialogs?: AnalysisDialog[] } | null;
   const storedAds = Array.isArray(analysis?.stats?.ads) ? analysis.stats.ads : [];
-  const evidence = new Map<string, { purchases: number; phones: number }>();
+  const evidence = new Map<string, { purchases: number; phones: number; purchaseKnown: boolean; phoneKnown: boolean }>();
   for (const dialog of analysis?.dialogs || []) {
     if (!dialog.adId) continue;
-    const current = evidence.get(dialog.adId) || { purchases: 0, phones: 0 };
-    const target = Boolean(dialog.goalReached);
-    const purchase = dialog.purchase ?? (target && /(покуп|оплат|билет|приобр)/i.test(`${dialog.goal || ""} ${dialog.issue || ""}`));
-    current.purchases += Number(purchase);
-    current.phones += Number(Boolean(dialog.metrics?.hasPhone));
+    const current = evidence.get(dialog.adId) || { purchases: 0, phones: 0, purchaseKnown: false, phoneKnown: false };
+    const purchaseKnown = dialog.purchase !== undefined || dialog.goalReached !== undefined;
+    const phoneKnown = dialog.metrics?.hasPhone !== undefined;
+    if (purchaseKnown) {
+      const target = Boolean(dialog.goalReached);
+      const purchase = dialog.purchase ?? (target && /(покуп|оплат|билет|приобр)/i.test(`${dialog.goal || ""} ${dialog.issue || ""}`));
+      current.purchases += Number(purchase);
+      current.purchaseKnown = true;
+    }
+    if (phoneKnown) {
+      current.phones += Number(Boolean(dialog.metrics?.hasPhone));
+      current.phoneKnown = true;
+    }
     evidence.set(dialog.adId, current);
   }
   const ads = storedAds.map((ad) => {
     const fallback = evidence.get(ad.adId);
-    return { ...ad, purchases: ad.purchases ?? fallback?.purchases ?? 0, phones: ad.phones ?? fallback?.phones ?? 0 };
+    return {
+      ...ad,
+      purchases: ad.purchases !== undefined ? ad.purchases : fallback?.purchaseKnown ? fallback.purchases : null,
+      phones: ad.phones !== undefined ? ad.phones : fallback?.phoneKnown ? fallback.phones : null,
+    };
   });
   return Response.json({
     ads: await enrichWithVkAds(ads, communityId),

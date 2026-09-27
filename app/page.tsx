@@ -5,7 +5,7 @@ import { createClient, SupabaseClient, User } from "@supabase/supabase-js";
 
 type Period = "30" | "60" | "90";
 type Community = { id: number; name: string; photo: string | null };
-type StoredAnalysis = { stats: LiveStats; dialogs: LiveDialog[]; period: Period };
+type StoredAnalysis = { stats: LiveStats; dialogs: LiveDialog[]; period: Period; savedAt?: string };
 type SavedCommunity = Community & { token: string; latestAnalysis?: StoredAnalysis | LiveStats | null };
 type SavedSenlerConnection = { communityId: number; name: string; photo: string | null; key: string };
 type LiveDialog = { peerId: number; adId?: string | null; score: number; status: string; issue: string; intent?: string; goal?: string; nuance?: string; recommendation?: string; betterReply?: string; confidence?: number; objections?: string[] };
@@ -98,7 +98,7 @@ export default function Home() {
       if (selected) {
         setCommunity({ id: selected.id, name: selected.name, photo: selected.photo });
         setToken(selected.token);
-        restoreAnalysis(selected.latestAnalysis);
+        restoreAnalysis(newerAnalysis(selected.latestAnalysis, cachedAnalysis(selected.id)));
       }
       localStorage.removeItem("dialogika.communities.v1");
       localStorage.removeItem("dialogika.routerCheapKey.v1");
@@ -242,6 +242,52 @@ export default function Home() {
     setLiveDialogs([]);
   }
 
+  const ACCOUNT_ANALYSIS_MAX_CHARS = 1_500_000;
+  const LOCAL_ANALYSIS_MAX_CHARS = 4_000_000;
+
+  function fitStoredAnalysis(analysis: StoredAnalysis, maxChars: number): StoredAnalysis {
+    const serialized = JSON.stringify(analysis);
+    if (serialized.length <= maxChars) return analysis;
+    const base: StoredAnalysis = { ...analysis, dialogs: [] };
+    let used = JSON.stringify(base).length;
+    const dialogs: LiveDialog[] = [];
+    for (const dialog of analysis.dialogs) {
+      const size = JSON.stringify(dialog).length + 1;
+      if (used + size > maxChars) break;
+      dialogs.push(dialog);
+      used += size;
+    }
+    return { ...analysis, dialogs };
+  }
+
+  function cacheAnalysis(communityId: number, analysis: StoredAnalysis) {
+    try {
+      const cached = fitStoredAnalysis(analysis, LOCAL_ANALYSIS_MAX_CHARS);
+      localStorage.setItem(`dialogika.analysis.${communityId}.v2`, JSON.stringify(cached));
+    } catch {
+      // Local cache is best-effort only. The account copy is still saved below.
+    }
+  }
+
+  function cachedAnalysis(communityId: number) {
+    try {
+      const raw = localStorage.getItem(`dialogika.analysis.${communityId}.v2`);
+      return raw ? JSON.parse(raw) as StoredAnalysis : null;
+    } catch {
+      return null;
+    }
+  }
+
+  function newerAnalysis(server: SavedCommunity["latestAnalysis"], local: StoredAnalysis | null) {
+    if (!local) return server;
+    if (!server || !("stats" in server)) return local;
+    const serverTime = Date.parse(server.savedAt || "");
+    const localTime = Date.parse(local.savedAt || "");
+    if (!Number.isFinite(serverTime)) return local;
+    if (!Number.isFinite(localTime)) return server;
+    return localTime >= serverTime ? local : server;
+  }
+
   async function disconnectCommunity() {
     if (!community) return;
     await deleteSetting("vk", String(community.id), accessToken);
@@ -295,13 +341,21 @@ export default function Home() {
         let response: Response | null = null;
         let responseText = "";
         for (let attempt = 0; attempt < 2; attempt += 1) {
-          response = await fetch("/api/vk/analyze", {
-            method: "POST",
-            headers: { "content-type": "application/json" },
-            body: JSON.stringify({ token, openaiKey, senlerCredential: senlerConnections.find((item) => item.communityId === community.id)?.key || "", preferredModel: model, groupId: community.id, days: Number(period), offset: pageOffset }),
-          });
-          responseText = await response.text();
-          if (response.ok || response.status < 500 || response.status === 524 || attempt === 1) break;
+          try {
+            response = await fetch("/api/vk/analyze", {
+              method: "POST",
+              headers: { "content-type": "application/json" },
+              body: JSON.stringify({ token, openaiKey, senlerCredential: senlerConnections.find((item) => item.communityId === community.id)?.key || "", preferredModel: model, groupId: community.id, days: Number(period), offset: pageOffset }),
+            });
+            responseText = await response.text();
+            if (response.ok || response.status < 500 || response.status === 524 || attempt === 1) break;
+          } catch (error) {
+            if (attempt === 1) {
+              throw new Error(error instanceof Error && error.message === "Failed to fetch"
+                ? "Соединение с сервером анализа оборвалось. Запустите анализ ещё раз — предыдущий результат сохранён."
+                : error instanceof Error ? error.message : "Сервер анализа не ответил");
+            }
+          }
           setNotice(`Сервер задержал пачку. Повторная попытка ${attempt + 2} из 2…`);
           await new Promise((resolve) => setTimeout(resolve, 1200 * (attempt + 1)));
         }
@@ -407,14 +461,26 @@ export default function Home() {
         ai: { ...aiTotals, model: [...aiModels].join(", ") || "резервный алгоритм", nuances: [...new Set(aiTotals.nuances)].slice(0, 6), recommendations: [...new Set(aiTotals.recommendations)].slice(0, 6) },
       };
       setLiveStats(completedStats);
-      const storedAnalysis: StoredAnalysis = { stats: completedStats, dialogs: analyzedDialogs, period };
-      setConnections((current) => current.map((item) => item.id === community.id ? { ...item, latestAnalysis: storedAnalysis } : item));
-      await saveSetting({ kind: "vk", externalId: String(community.id), name: community.name, photo: community.photo, latestAnalysis: storedAnalysis }, accessToken);
       setLiveDialogs(analyzedDialogs);
-      setNotice(aiTotals.fallbackCount
-        ? `Частичный анализ: ИИ обработал ${aiTotals.analyzedCount} из ${totals.dialogs} диалогов. Для ${aiTotals.fallbackCount} применены формальные признаки; эти выводы требуют проверки.`
-        : `Готово: ИИ обработал все ${totals.dialogs} активных диалогов за ${period} дней. Использовано ${aiTotals.totalTokens.toLocaleString("ru-RU")} токенов.`);
       setTab("Обзор");
+      const storedAnalysis: StoredAnalysis = { stats: completedStats, dialogs: analyzedDialogs, period, savedAt: new Date().toISOString() };
+      setConnections((current) => current.map((item) => item.id === community.id ? { ...item, latestAnalysis: storedAnalysis } : item));
+      cacheAnalysis(community.id, storedAnalysis);
+
+      let saveWarning = "";
+      try {
+        const accountAnalysis = fitStoredAnalysis(storedAnalysis, ACCOUNT_ANALYSIS_MAX_CHARS);
+        await saveSetting({ kind: "vk", externalId: String(community.id), name: community.name, photo: community.photo, latestAnalysis: accountAnalysis }, accessToken);
+        if (accountAnalysis.dialogs.length < storedAnalysis.dialogs.length) {
+          saveWarning = ` В аккаунте сохранена статистика и ${accountAnalysis.dialogs.length} из ${storedAnalysis.dialogs.length} карточек диалогов; полный текущий результат оставлен в этом браузере.`;
+        }
+      } catch {
+        saveWarning = " Анализ завершён и показан, но сервер не смог сохранить копию результата в аккаунт. В этом браузере результат сохранён локально.";
+      }
+
+      setNotice((aiTotals.fallbackCount
+        ? `Частичный анализ: ИИ обработал ${aiTotals.analyzedCount} из ${totals.dialogs} диалогов. Для ${aiTotals.fallbackCount} применены формальные признаки; эти выводы требуют проверки.`
+        : `Готово: ИИ обработал все ${totals.dialogs} активных диалогов за ${period} дней. Использовано ${aiTotals.totalTokens.toLocaleString("ru-RU")} токенов.`) + saveWarning);
     } catch (error) {
       restoreAnalysis(connections.find((item) => item.id === community.id)?.latestAnalysis);
       setNotice(error instanceof Error ? error.message : "Ошибка анализа");

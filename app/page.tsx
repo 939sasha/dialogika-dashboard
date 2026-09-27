@@ -46,7 +46,7 @@ export default function Home() {
   const [senlerConnections, setSenlerConnections] = useState<SavedSenlerConnection[]>([]);
   const [serverAds, setServerAds] = useState<AdStat[]>([]);
   const [serverAdDialogTotal, setServerAdDialogTotal] = useState(0);
-  const [adCabinet, setAdCabinet] = useState<{ connected: boolean; accountId: string | null } | null>(null);
+  const [adCabinet, setAdCabinet] = useState<{ connected: boolean; accountId: string | null; cachedMatches?: number } | null>(null);
   const [serverAdsStatus, setServerAdsStatus] = useState<"idle" | "loading" | "ready" | "error">("idle");
   const [serverAdsError, setServerAdsError] = useState("");
   const [community, setCommunity] = useState<Community | null>(null);
@@ -127,7 +127,7 @@ export default function Home() {
         if (!response.ok) throw new Error(result.error || "Не удалось загрузить объявления");
         return result;
       })
-      .then((result: { ads?: AdStat[]; dialogs?: number; cabinet?: { connected: boolean; accountId: string | null } }) => {
+      .then((result: { ads?: AdStat[]; dialogs?: number; cabinet?: { connected: boolean; accountId: string | null; cachedMatches?: number } }) => {
         if (cancelled) return;
         setServerAds(Array.isArray(result.ads) ? result.ads : []);
         setServerAdDialogTotal(Number(result.dialogs) || 0);
@@ -981,7 +981,7 @@ function DialogsTable({ query, setQuery, filteredDialogs, analyzed }: { query: s
   </div>;
 }
 
-function AdsDashboard({ stats, dialogs, serverAds, serverDialogTotal, serverStatus, serverError, cabinet, accessToken, communityId, onAnalyze }: { stats: LiveStats | null; dialogs: LiveDialog[]; serverAds: AdStat[]; serverDialogTotal: number; serverStatus: "idle" | "loading" | "ready" | "error"; serverError: string; cabinet: { connected: boolean; accountId: string | null } | null; accessToken: string; communityId: number | null; onAnalyze: () => void }) {
+function AdsDashboard({ stats, dialogs, serverAds, serverDialogTotal, serverStatus, serverError, cabinet, accessToken, communityId, onAnalyze }: { stats: LiveStats | null; dialogs: LiveDialog[]; serverAds: AdStat[]; serverDialogTotal: number; serverStatus: "idle" | "loading" | "ready" | "error"; serverError: string; cabinet: { connected: boolean; accountId: string | null; cachedMatches?: number } | null; accessToken: string; communityId: number | null; onAnalyze: () => void }) {
   const [selectedAdId, setSelectedAdId] = useState<string | null>(null);
   const [detailStatus, setDetailStatus] = useState<"idle" | "loading" | "ready" | "error">("idle");
   const [detailError, setDetailError] = useState("");
@@ -1083,14 +1083,14 @@ function AdsDashboard({ stats, dialogs, serverAds, serverDialogTotal, serverStat
 
   if (serverStatus === "loading" || serverStatus === "error" || serverStatus === "ready") return <div className="pageBlock adsPage">
     <div className="introRow"><div><p className="eyebrow">АТРИБУЦИЯ VK РЕКЛАМЫ · v3.1</p><h2>Какие источники привели обращения</h2><p>Нажмите на источник, чтобы открыть примеры диалогов и проверить классификацию.</p></div></div>
-    {serverStatus==="ready"&&<div className="adDataState">{cabinet?.connected?`Кабинет «Эмалис» подключён · ID ${cabinet.accountId}. Другие рекламные кабинеты к этому сервису пока не подключены.`:"Для выбранного сообщества рекламный кабинет VK Ads не подключён."}</div>}
+    {serverStatus==="ready"&&<div className="adDataState">{cabinet?.connected?`Кабинет «Эмалис» подключён · ID ${cabinet.accountId}. Другие рекламные кабинеты к этому сервису пока не подключены.`:cabinet?.cachedMatches?`Названия ${cabinet.cachedMatches} источников восстановлены из сохранённых данных VK Ads. Остальные показаны по ID; обновление кабинета сейчас недоступно.`:"Для выбранного сообщества рекламный кабинет VK Ads не подключён."}</div>}
     {serverStatus==="loading"&&<div className="adDataState">Загружаю статистику объявлений…</div>}
     {serverStatus==="error"&&<div className="adDataState error">Не удалось сверить источники: {serverError}. Сохранённые числа доступны ниже.</div>}
     {ads.length>0&&serverStatus!=="loading"&&<>
       <div className="adDataState success">Загружено: {ads.length} рекламных меток · {ads.reduce((s,a)=>s+a.dialogs,0)} рекламных диалогов из {serverDialogTotal||stats?.dialogs||dialogs.length}</div>
       <p className="adDefinitions">Покупка — отдельно подтверждённая покупка/оплата. Телефон — клиент оставил номер в переписке. «—» означает, что старый отчёт ещё не содержал этот признак. Нажмите на источник, чтобы увидеть фрагменты диалогов.</p>
       <div className="simpleAdsTable"><table><thead><tr><th>Источник / объявление VK</th><th>Диалоги</th><th>Интерес</th><th>Запись / покупка</th><th>Покупка</th><th>Телефон</th><th>Потеряны</th><th>Качество</th></tr></thead><tbody>
-      {ads.map((ad)=>{const q=ad.dialogs?Math.round(ad.scoreSum/ad.dialogs):0;return <tr key={ad.adId}><td className="adIdentity"><button className="adIdentityButton" onClick={()=>openAdDialogs(ad.adId)}><b>{sourceTitle(ad)}</b><small>{ad.matched?(ad.matchType==="campaign"?`ID кампании: ${ad.adId}`:ad.matchType==="group"?`ID группы: ${ad.adId}`:`ID объявления: ${ad.adId}`):(ad.lookupUnavailable?ad.lookupReason||"Кабинет VK Ads не ответил":"ID не найден в подключённом кабинете «Эмалис».")}</small><em>Открыть диалоги →</em></button></td><td>{ad.dialogs}</td><td>{ad.leads} · {pct(ad.leads,ad.dialogs)}%</td><td>{ad.targets} · {pct(ad.targets,ad.dialogs)}%</td><td>{ad.purchases == null ? "—" : `${ad.purchases} · ${pct(ad.purchases,ad.dialogs)}%`}</td><td>{ad.phones == null ? "—" : `${ad.phones} · ${pct(ad.phones,ad.dialogs)}%`}</td><td>{ad.lost} · {pct(ad.lost,ad.dialogs)}%</td><td><b>{q}/100</b></td></tr>})}
+      {ads.map((ad)=>{const q=ad.dialogs?Math.round(ad.scoreSum/ad.dialogs):0;return <tr key={ad.adId}><td className="adIdentity"><button className="adIdentityButton" onClick={()=>openAdDialogs(ad.adId)}><b>{sourceTitle(ad)}</b><small>{ad.matched?(ad.matchType==="campaign"?`ID кампании: ${ad.adId}`:ad.matchType==="group"?`ID группы: ${ad.adId}`:`ID объявления: ${ad.adId}${ad.groupId?` · группа ${ad.groupName || ad.groupId}`:""}${ad.campaignId?` · кампания ${ad.campaignName || ad.campaignId}`:""}`):(ad.lookupUnavailable?ad.lookupReason||"Кабинет VK Ads не ответил":"ID не найден в подключённом кабинете «Эмалис».")}</small><em>Открыть диалоги →</em></button></td><td>{ad.dialogs}</td><td>{ad.leads} · {pct(ad.leads,ad.dialogs)}%</td><td>{ad.targets} · {pct(ad.targets,ad.dialogs)}%</td><td>{ad.purchases == null ? "—" : `${ad.purchases} · ${pct(ad.purchases,ad.dialogs)}%`}</td><td>{ad.phones == null ? "—" : `${ad.phones} · ${pct(ad.phones,ad.dialogs)}%`}</td><td>{ad.lost} · {pct(ad.lost,ad.dialogs)}%</td><td><b>{q}/100</b></td></tr>})}
       </tbody></table></div>
     </>}
     {panel}

@@ -1,4 +1,4 @@
-import { createClient } from "@supabase/supabase-js";
+import { createClient, SupabaseClient } from "@supabase/supabase-js";
 import { publicSupabaseConfig } from "../../lib/supabaseConfig";
 
 type AdStat = { adId: string; dialogs: number; leads: number; targets: number; purchases?: number | null; phones?: number | null; lost: number; scoreSum: number; matched?: boolean; lookupUnavailable?: boolean; lookupReason?: string; matchType?: "banner" | "group" | "campaign"; adName?: string; groupId?: string; groupName?: string; campaignId?: string; campaignName?: string };
@@ -7,6 +7,34 @@ type VkEntity = { id?: number | string; name?: string; campaign_id?: number | st
 
 const EMALIS_COMMUNITY_ID = "109534321";
 const VK_API_BASE = "https://ads.vk.com/api/v2";
+
+async function enrichFromSavedVkAds(ads: AdStat[], client: SupabaseClient, userId: string, communityId: string) {
+  if (!ads.length || communityId !== EMALIS_COMMUNITY_ID) return { ads, matches: 0 };
+  const { data: project } = await client.from("projects").select("id")
+    .eq("user_id", userId).eq("vk_account_id", process.env.VK_ADS_EMALIS_ACCOUNT_ID || "29867480")
+    .limit(1).maybeSingle();
+  if (!project) return { ads, matches: 0 };
+  const { data: entities } = await client.from("ad_entities")
+    .select("external_id,name,entity_type,parent_external_id")
+    .eq("project_id", project.id).eq("platform", "vk").limit(1000);
+  if (!entities?.length) return { ads, matches: 0 };
+  const byId = new Map(entities.map((entity) => [String(entity.external_id), entity]));
+  let matches = 0;
+  return { ads: ads.map((ad) => {
+    const entity = byId.get(ad.adId);
+    if (!entity || !["ad", "ad_group"].includes(entity.entity_type)) return ad;
+    matches += 1;
+    const groupId = entity.entity_type === "ad" ? String(entity.parent_external_id || "") : ad.adId;
+    const group = byId.get(groupId);
+    const campaignId = String(group?.parent_external_id || "");
+    return {
+      ...ad, matched: true, matchType: entity.entity_type === "ad" ? "banner" as const : "group" as const,
+      adName: entity.entity_type === "ad" ? entity.name || undefined : undefined,
+      groupId: groupId || undefined, groupName: group?.name || undefined,
+      campaignId: campaignId || undefined, lookupUnavailable: false,
+    };
+  }), matches };
+}
 
 async function vkList(path: string, fields: string, token: string, ids: string[]) {
   const rows: VkEntity[] = [];
@@ -38,7 +66,7 @@ async function vkList(path: string, fields: string, token: string, ids: string[]
 async function enrichWithVkAds(ads: AdStat[], communityId: string) {
   const vkToken = process.env.VK_ADS_EMALIS_TOKEN;
   if (!ads.length) return ads;
-  if (!vkToken || communityId !== EMALIS_COMMUNITY_ID) return ads.map((ad) => ({
+  if (!vkToken || communityId !== EMALIS_COMMUNITY_ID) return ads.map((ad) => ad.matched ? ad : ({
     ...ad, matched: false, lookupUnavailable: true,
     lookupReason: communityId !== EMALIS_COMMUNITY_ID ? "Для этого сообщества рекламный кабинет ещё не подключён" : "Ключ кабинета VK Ads не настроен на сервере",
   }));
@@ -80,7 +108,7 @@ async function enrichWithVkAds(ads: AdStat[], communityId: string) {
     });
   } catch (error) {
     const reason = error instanceof Error ? error.message : "VK Ads не ответил";
-    return ads.map((ad) => ({ ...ad, matched: false, lookupUnavailable: true, lookupReason: reason }));
+    return ads.map((ad) => ad.matched ? ad : ({ ...ad, matched: false, lookupUnavailable: true, lookupReason: reason }));
   }
 }
 
@@ -127,12 +155,14 @@ export async function GET(request: Request) {
       phones: ad.phones !== undefined ? ad.phones : fallback?.phoneKnown ? fallback.phones : null,
     };
   });
+  const cached = await enrichFromSavedVkAds(ads, client, user.id, communityId);
   return Response.json({
-    ads: await enrichWithVkAds(ads, communityId),
+    ads: await enrichWithVkAds(cached.ads, communityId),
     dialogs: analysis?.stats?.dialogs || 0,
     cabinet: {
       connected: communityId === EMALIS_COMMUNITY_ID && Boolean(process.env.VK_ADS_EMALIS_TOKEN),
       accountId: communityId === EMALIS_COMMUNITY_ID ? process.env.VK_ADS_EMALIS_ACCOUNT_ID || "29867480" : null,
+      cachedMatches: cached.matches,
     },
   });
 }

@@ -6,8 +6,8 @@ import { createClient, SupabaseClient, User } from "@supabase/supabase-js";
 type Period = "30" | "60" | "90";
 type Community = { id: number; name: string; photo: string | null };
 type StoredAnalysis = { stats: LiveStats; dialogs: LiveDialog[]; period: Period; savedAt?: string; version?: 3 };
-type SavedCommunity = Community & { token: string; latestAnalysis?: StoredAnalysis | LiveStats | null };
-type SavedSenlerConnection = { communityId: number; name: string; photo: string | null; key: string };
+type SavedCommunity = Community & { token: string; credentialAvailable?: boolean; latestAnalysis?: StoredAnalysis | LiveStats | null };
+type SavedSenlerConnection = { communityId: number; name: string; photo: string | null; key: string; credentialAvailable?: boolean };
 type DialogMetrics = { hasPhone: boolean; hasInterest: boolean; responseSum: number; responseCount: number; slowResponse: boolean; noNextStep: boolean; unanswered: boolean; firstEverDate: number | null; objectionKeys: string[] };
 type LiveDialog = { peerId: number; adId?: string | null; score: number; status: string; issue: string; intent?: string; goal?: string; goalReached?: boolean; purchase?: boolean; nuance?: string; recommendation?: string; betterReply?: string; confidence?: number; objections?: string[]; revision?: string; lastMessageId?: number; lastMessageDate?: number; metrics?: DialogMetrics; aiAnalyzed?: boolean; aiModel?: string };
 type AdStat = { adId: string; dialogs: number; leads: number; targets: number; purchases?: number; phones?: number; lost: number; scoreSum: number; matched?: boolean; lookupUnavailable?: boolean; lookupReason?: string; matchType?: "banner" | "group" | "campaign"; adName?: string; groupId?: string; groupName?: string; campaignId?: string; campaignName?: string };
@@ -72,7 +72,7 @@ export default function Home() {
     let cancelled = false;
     (async () => {
       const response = await fetch("/api/settings", { headers: { authorization: `Bearer ${accessToken}` } });
-      const result = await response.json() as { communities?: SavedCommunity[]; routerKey?: string; senlerConnections?: SavedSenlerConnection[]; error?: string };
+      const result = await response.json() as { communities?: SavedCommunity[]; routerKey?: string; routerCredentialAvailable?: boolean; senlerConnections?: SavedSenlerConnection[]; credentialRecoveryNeeded?: boolean; error?: string };
       if (!response.ok) throw new Error(result.error || "Не удалось загрузить подключения");
       let saved = result.communities || [];
       const local = JSON.parse(localStorage.getItem("dialogika.communities.v1") || "[]") as SavedCommunity[];
@@ -95,6 +95,9 @@ export default function Home() {
       setConnections(saved);
       setOpenaiKey(result.routerKey || localRouter);
       setSenlerConnections(result.senlerConnections || []);
+      if (result.credentialRecoveryNeeded) {
+        setNotice("Подключения найдены, но серверный ключ шифрования недоступен. Сохранённые данные и последний анализ восстановлены; ключи VK, Router Cheap и Senler пока нельзя использовать.");
+      }
       const activeId = Number(localStorage.getItem("dialogika.activeCommunity.v1"));
       const selected = saved.find((item) => item.id === activeId) || saved[0];
       if (selected) {
@@ -310,9 +313,14 @@ export default function Home() {
   }
 
   async function runAnalysis() {
-    if (!community || !token) {
+    if (!community) {
       setTab("Настройки");
       setNotice("Сначала подключите сообщество ВКонтакте.");
+      return;
+    }
+    if (!token) {
+      setTab("Настройки");
+      setNotice("Сообщество найдено, но его токен сейчас недоступен для расшифровки. Подключение не удалено.");
       return;
     }
     if (!openaiKey) {
@@ -762,7 +770,7 @@ export default function Home() {
         {tab === "Диалоги" && <DialogsTable query={query} setQuery={setQuery} filteredDialogs={filteredDialogs} analyzed={Boolean(liveStats)} />}
         {tab === "Качество" && <Quality stats={liveStats} />}
         {tab === "ИИ-бот" && <Bot goal={liveStats?.goal} />}
-        {tab === "Настройки" && <Settings community={community} connections={connections} openaiConnected={Boolean(openaiKey)} senlerConnected={Boolean(community && senlerConnections.some((item) => item.communityId === community.id))} busy={busy} onConnect={connectCommunity} onSelect={selectCommunity} onConnectOpenAI={connectOpenAI} onConnectSenler={connectSenler} onDisconnectOpenAI={async () => { await deleteSetting("router", "default", accessToken); setOpenaiKey(""); setNotice("Router Cheap отключён. Ключ удалён из вашего аккаунта."); }} onDisconnectSenler={async () => { if (!community) return; await deleteSetting("senler", String(community.id), accessToken); setSenlerConnections((current) => current.filter((item) => item.communityId !== community.id)); setNotice("Senler отключён. Ключ удалён из вашего аккаунта."); }} onDisconnect={disconnectCommunity} />}
+        {tab === "Настройки" && <Settings community={community} connections={connections} openaiConnected={Boolean(openaiKey)} senlerConnected={Boolean(community && senlerConnections.some((item) => item.communityId === community.id && Boolean(item.key)))} busy={busy} onConnect={connectCommunity} onSelect={selectCommunity} onConnectOpenAI={connectOpenAI} onConnectSenler={connectSenler} onDisconnectOpenAI={async () => { await deleteSetting("router", "default", accessToken); setOpenaiKey(""); setNotice("Router Cheap отключён. Ключ удалён из вашего аккаунта."); }} onDisconnectSenler={async () => { if (!community) return; await deleteSetting("senler", String(community.id), accessToken); setSenlerConnections((current) => current.filter((item) => item.communityId !== community.id)); setNotice("Senler отключён. Ключ удалён из вашего аккаунта."); }} onDisconnect={disconnectCommunity} />}
       </section>
     </main>
   );
@@ -829,7 +837,7 @@ function Settings({ community, connections, openaiConnected, senlerConnected, bu
         <h3>{connections.length ? "Подключённые сообщества" : "Вставьте токен доступа"}</h3>
         {connections.length > 0 && <div className="connectedList">
           {connections.map((item) => <button key={item.id} className={community?.id === item.id ? "connectedChoice active" : "connectedChoice"} onClick={() => onSelect(item)}>
-            <span className="communityIcon">VK</span><span><b>{item.name}</b><small>ID {item.id}</small></span><i>{community?.id === item.id ? "●" : "○"}</i>
+            <span className="communityIcon">VK</span><span><b>{item.name}</b><small>ID {item.id}{item.credentialAvailable === false ? " · токен требует восстановления" : ""}</small></span><i>{item.credentialAvailable === false ? "!" : community?.id === item.id ? "●" : "○"}</i>
           </button>)}
         </div>}
         <label className="tokenLabel">{connections.length ? "Добавить ещё одно сообщество" : "API-токен"}<input type="password" autoComplete="off" value={value} onChange={(e) => setValue(e.target.value)} placeholder="vk1.a.…" /></label>

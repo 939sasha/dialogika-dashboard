@@ -379,7 +379,6 @@ export default function Home() {
       const reusedPeerIds = new Set<number>(checkpoint?.reusedPeerIds || []);
       const changedPeerIds = new Set<number>(checkpoint?.changedPeerIds || []);
       let scannedCount = checkpoint?.scannedCount || 0;
-      let scanCycles = 0;
       const visitedOffsets = new Set<number>();
       let newAiAnalyzedCount = checkpoint?.aiAnalyzedCount || 0;
       let newFallbackCount = checkpoint?.fallbackCount || 0;
@@ -446,8 +445,6 @@ export default function Home() {
       };
 
       while (!done) {
-        scanCycles += 1;
-        if (scanCycles > 500) throw new Error("Анализ остановлен защитой от зацикливания. Обновите страницу и запустите его повторно.");
         if (totalAvailable !== null && offset >= totalAvailable) break;
 
         const pageOffsets = Array.from({ length: parallelPages }, (_, index) => offset + index * PAGE_SIZE)

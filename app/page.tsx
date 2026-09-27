@@ -355,7 +355,7 @@ export default function Home() {
       let offset = 0;
       let done = false;
       let totalAvailable: number | null = null;
-      let parallelPages = 2;
+      const parallelPages = 1;
       let preferredModel = reusable?.stats.ai.model?.split(",")[0]?.trim() || "";
       let objectionLabels: Record<string, string> = {};
       const dialogMap = new Map<number, LiveDialog>();
@@ -488,7 +488,6 @@ export default function Home() {
         setNotice(incremental
           ? "Проверено " + safeScannedCount + " диалогов: " + reusedPeerIds.size + " без повторного ИИ-анализа, " + changedPeerIds.size + " обновлено…"
           : "Анализ продолжается: найдено " + dialogMap.size + " диалогов из " + (totalAvailable || "…") + "…");
-        parallelPages = 3;
       }
 
       if (changedPeerIds.size > 0 && newAiAnalyzedCount === 0) {

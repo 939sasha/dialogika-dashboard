@@ -34,21 +34,57 @@ type SenlerSubscriber = {
   utms?: Array<Record<string, unknown>>;
 };
 
+function sanitizeMessageText(value?: string) {
+  return (value || "[вложение]")
+    .replace(PHONE_RE, "[ТЕЛЕФОН]")
+    .replace(/[\w.+-]+@[\w.-]+\.[a-z]{2,}/gi, "[EMAIL]")
+    .replace(/https?:\/\/\S+/gi, "[ССЫЛКА]")
+    .replace(/\b(?:id|club)\d+\b/gi, "[VK_ID]")
+    .slice(0, 500);
+}
+
 function sanitizedTranscript(messages: VkMessage[]) {
   return [...messages]
     .sort((a, b) => a.date - b.date)
     .slice(-40)
     .map((message) => {
-      const text = (message.text || "[вложение]")
-        .replace(PHONE_RE, "[ТЕЛЕФОН]")
-        .replace(/[\w.+-]+@[\w.-]+\.[a-z]{2,}/gi, "[EMAIL]")
-        .replace(/https?:\/\/\S+/gi, "[ССЫЛКА]")
-        .replace(/\b(?:id|club)\d+\b/gi, "[VK_ID]");
       const time = new Date(message.date * 1000).toISOString();
-      return `${time} ${message.out ? "МЕНЕДЖЕР" : "КЛИЕНТ"}: ${text}`;
+      return `${time} ${message.out ? "МЕНЕДЖЕР" : "КЛИЕНТ"}: ${sanitizeMessageText(message.text)}`;
     })
     .join("\n")
     .slice(-12000);
+}
+
+function evidenceMessages(messages: VkMessage[]) {
+  const chronological = [...messages].sort((a, b) => a.date - b.date);
+  if (!chronological.length) return [];
+  const signalIndexes = chronological
+    .map((message, index) => ({
+      index,
+      text: message.text || "",
+    }))
+    .filter(({ text }) => PHONE_RE.test(text) || PURCHASE_SUCCESS_RE.test(text) || INTEREST_RE.test(text))
+    .map(({ index }) => index);
+
+  const selected = new Set<number>();
+  for (const index of signalIndexes.slice(-2)) {
+    if (index > 0) selected.add(index - 1);
+    selected.add(index);
+    if (index + 1 < chronological.length) selected.add(index + 1);
+  }
+  for (let index = chronological.length - 1; index >= 0 && selected.size < 6; index -= 1) selected.add(index);
+
+  return [...selected]
+    .sort((a, b) => a - b)
+    .slice(-6)
+    .map((index) => {
+      const message = chronological[index];
+      return {
+        role: message.out ? "Менеджер" as const : "Клиент" as const,
+        text: sanitizeMessageText(message.text),
+        date: new Date(message.date * 1000).toISOString(),
+      };
+    });
 }
 
 async function vkMethod(method: string, token: string, params: Record<string, string>) {
@@ -244,6 +280,7 @@ export async function POST(request: Request) {
       revision: string;
       lastMessageId: number;
       lastMessageDate: number;
+      evidence: Array<{ role: "Клиент" | "Менеджер"; text: string; date: string }>;
     };
 
     const unchangedPeerIds: number[] = [];
@@ -271,6 +308,7 @@ export async function POST(request: Request) {
         revision,
         lastMessageId: lastMessage.id,
         lastMessageDate: lastMessage.date,
+        evidence: evidenceMessages(history.messages),
         ...analyzeDialog(history.messages),
       } satisfies AnalysisRow;
     }));
@@ -378,6 +416,7 @@ export async function POST(request: Request) {
           revision: row.revision,
           lastMessageId: row.lastMessageId,
           lastMessageDate: row.lastMessageDate,
+          evidence: row.evidence,
           goalReached: ai?.goalReached ?? row.hasGoal,
           purchase: row.purchaseConfirmed || Boolean(ai?.goalReached && /(покуп|оплат|билет|приобр)/i.test(`${ai.goal || ""} ${ai.issue || ""}`)),
           aiAnalyzed: Boolean(ai),

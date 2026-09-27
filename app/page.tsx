@@ -6,6 +6,12 @@ import { createClient, SupabaseClient, User } from "@supabase/supabase-js";
 type Period = "30" | "60" | "90";
 type Community = { id: number; name: string; photo: string | null };
 type StoredAnalysis = { stats: LiveStats; dialogs: LiveDialog[]; period: Period; savedAt?: string; version?: 4 };
+type AnalysisCheckpoint = {
+  version: 1; savedAt: number; offset: number; totalAvailable: number | null; dialogs: LiveDialog[];
+  reusedPeerIds: number[]; changedPeerIds: number[]; scannedCount: number; preferredModel: string;
+  objectionLabels: Record<string, string>; aiAnalyzedCount: number; fallbackCount: number;
+  aiFailureReason: string; aiUsage: { inputTokens: number; outputTokens: number; totalTokens: number; estimatedCostUsd: number };
+};
 type SavedCommunity = Community & { token: string; credentialAvailable?: boolean; latestAnalysis?: StoredAnalysis | LiveStats | null };
 type SavedSenlerConnection = { communityId: number; name: string; photo: string | null; key: string; credentialAvailable?: boolean };
 type DialogMetrics = { hasPhone: boolean; hasInterest: boolean; responseSum: number; responseCount: number; slowResponse: boolean; noNextStep: boolean; unanswered: boolean; firstEverDate: number | null; objectionKeys: string[] };
@@ -341,33 +347,44 @@ export default function Home() {
       [...reusableDialogs.values()].map((dialog) => [String(dialog.peerId), dialog.revision as string]),
     );
     const incremental = reusableDialogs.size > 0;
+    const checkpointKey = `dialogika-analysis-checkpoint-v1:${user?.id || ""}:${community.id}:${period}`;
+    let checkpoint: AnalysisCheckpoint | null = null;
+    try {
+      const saved = sessionStorage.getItem(checkpointKey);
+      if (saved) {
+        const parsed = JSON.parse(saved) as AnalysisCheckpoint;
+        if (parsed.version === 1 && Number.isInteger(parsed.offset) && parsed.offset >= 0 &&
+            Array.isArray(parsed.dialogs) && Date.now() - parsed.savedAt < 24 * 60 * 60 * 1000) checkpoint = parsed;
+        else sessionStorage.removeItem(checkpointKey);
+      }
+    } catch { /* An unavailable browser store only disables resume. */ }
 
     setBusy(true);
     setLiveStats(null);
     setLiveDialogs([]);
-    setProgress({ processed: 0, total: 0 });
-    setNotice(incremental
+    setProgress({ processed: checkpoint?.scannedCount || 0, total: checkpoint?.totalAvailable || 0 });
+    setNotice(checkpoint ? `Продолжаю анализ с пачки ${checkpoint.offset}…` : incremental
       ? "Проверяю новые и изменённые переписки сообщества «" + community.name + "» за " + period + " дней…"
       : "Загружаю все переписки сообщества «" + community.name + "» за " + period + " дней…");
 
     try {
       const PAGE_SIZE = 3;
-      let offset = 0;
+      let offset = checkpoint?.offset || 0;
       let done = false;
-      let totalAvailable: number | null = null;
+      let totalAvailable: number | null = checkpoint?.totalAvailable ?? null;
       const parallelPages = 1;
-      let preferredModel = reusable?.stats.ai.model?.split(",")[0]?.trim() || "";
-      let objectionLabels: Record<string, string> = {};
-      const dialogMap = new Map<number, LiveDialog>();
-      const reusedPeerIds = new Set<number>();
-      const changedPeerIds = new Set<number>();
-      let scannedCount = 0;
+      let preferredModel = checkpoint?.preferredModel || reusable?.stats.ai.model?.split(",")[0]?.trim() || "";
+      let objectionLabels: Record<string, string> = checkpoint?.objectionLabels || {};
+      const dialogMap = new Map<number, LiveDialog>((checkpoint?.dialogs || []).map((dialog) => [dialog.peerId, dialog]));
+      const reusedPeerIds = new Set<number>(checkpoint?.reusedPeerIds || []);
+      const changedPeerIds = new Set<number>(checkpoint?.changedPeerIds || []);
+      let scannedCount = checkpoint?.scannedCount || 0;
       let scanCycles = 0;
       const visitedOffsets = new Set<number>();
-      let newAiAnalyzedCount = 0;
-      let newFallbackCount = 0;
-      let aiFailureReason = "";
-      const aiUsage = { inputTokens: 0, outputTokens: 0, totalTokens: 0, estimatedCostUsd: 0 };
+      let newAiAnalyzedCount = checkpoint?.aiAnalyzedCount || 0;
+      let newFallbackCount = checkpoint?.fallbackCount || 0;
+      let aiFailureReason = checkpoint?.aiFailureReason || "";
+      const aiUsage = checkpoint?.aiUsage || { inputTokens: 0, outputTokens: 0, totalTokens: 0, estimatedCostUsd: 0 };
 
       const fetchPage = async (pageOffset: number, model: string) => {
         let response: Response | null = null;
@@ -483,6 +500,16 @@ export default function Home() {
         }
         if (totalAvailable !== null && nextOffset >= totalAvailable) done = true;
         offset = nextOffset;
+        try {
+          const nextCheckpoint = {
+            version: 1, savedAt: Date.now(), offset, totalAvailable, dialogs: [...dialogMap.values()],
+            reusedPeerIds: [...reusedPeerIds], changedPeerIds: [...changedPeerIds], scannedCount,
+            preferredModel, objectionLabels, aiAnalyzedCount: newAiAnalyzedCount,
+            fallbackCount: newFallbackCount, aiFailureReason, aiUsage,
+          } satisfies AnalysisCheckpoint;
+          sessionStorage.setItem(checkpointKey, JSON.stringify(nextCheckpoint));
+          checkpoint = nextCheckpoint;
+        } catch { /* Keep the active run even if browser storage is unavailable. */ }
         const safeScannedCount = totalAvailable === null ? scannedCount : Math.min(scannedCount, totalAvailable);
         setProgress({ processed: safeScannedCount, total: totalAvailable || 0 });
         setNotice(incremental
@@ -634,9 +661,10 @@ export default function Home() {
         successMessage += " Для " + newFallbackCount + " изменённых диалогов применены формальные признаки; эти выводы требуют проверки.";
       }
       setNotice(successMessage + saveWarning);
+      try { sessionStorage.removeItem(checkpointKey); } catch { /* The result is already saved. */ }
     } catch (error) {
       restoreAnalysis(previous);
-      setNotice(error instanceof Error ? error.message : "Ошибка анализа");
+      setNotice((error instanceof Error ? error.message : "Ошибка анализа") + (checkpoint ? " Повторный запуск продолжит с последней завершённой пачки." : ""));
     } finally {
       setBusy(false);
     }

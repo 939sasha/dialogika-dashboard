@@ -4,7 +4,7 @@ const VK_API = "https://api.vk.com/method";
 const VK_VERSION = "5.199";
 // Keep each Worker request comfortably below Cloudflare's proxy timeout.
 // The browser continues with the next page and updates visible progress after every batch.
-const BATCH_SIZE = 9;
+const BATCH_SIZE = 3;
 const PHONE_RE = /(?:\+?7|8)[\s\-()]?\d{3}[\s\-()]?\d{3}[\s\-]?\d{2}[\s\-]?\d{2}/;
 const PHONE_GLOBAL_RE = /(?:\+?7|8)[\s\-()]?\d{3}[\s\-()]?\d{3}[\s\-]?\d{2}[\s\-]?\d{2}/g;
 const INTEREST_RE = /(цен|стоим|сколько|билет|посет|запис|экскурс|выстав|мастер.?класс|расписан|места|оплат)\w*/i;
@@ -97,8 +97,8 @@ async function vkMethod(method: string, token: string, params: Record<string, st
       body,
     });
     const payload = await response.json() as { response?: unknown; error?: { error_code?: number; error_msg?: string } };
-    if (payload.error?.error_code === 6 && attempt < 4) {
-      await new Promise((resolve) => setTimeout(resolve, 400 * (attempt + 1)));
+    if ([6, 9].includes(payload.error?.error_code || 0) && attempt < 4) {
+      await new Promise((resolve) => setTimeout(resolve, 800 * (attempt + 1) * (attempt + 1)));
       continue;
     }
     if (payload.error) throw new Error(payload.error.error_msg || "Ошибка API ВКонтакте");

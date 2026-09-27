@@ -351,11 +351,11 @@ export default function Home() {
       : "Загружаю все переписки сообщества «" + community.name + "» за " + period + " дней…");
 
     try {
-      const PAGE_SIZE = 9;
+      const PAGE_SIZE = 3;
       let offset = 0;
       let done = false;
       let totalAvailable: number | null = null;
-      let parallelPages = 3;
+      let parallelPages = 2;
       let preferredModel = reusable?.stats.ai.model?.split(",")[0]?.trim() || "";
       let objectionLabels: Record<string, string> = {};
       const dialogMap = new Map<number, LiveDialog>();

@@ -334,6 +334,7 @@ export async function POST(request: Request) {
           analyzedCount: 0,
           fallbackCount: 0,
           failureReason: "",
+          diagnostics: [],
         };
     const aiByPeer = new Map(aiResult.dialogs.map((dialog) => [dialog.peerId, dialog]));
 
@@ -402,6 +403,7 @@ export async function POST(request: Request) {
         analyzedCount: aiResult.analyzedCount,
         fallbackCount: aiResult.fallbackCount,
         failureReason: aiResult.failureReason,
+        diagnostics: aiResult.diagnostics,
         usage: aiResult.usage,
         goals: aiGoals,
         nuances: aiResult.dialogs.map((dialog) => dialog.nuance).filter(Boolean),

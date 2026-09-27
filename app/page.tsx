@@ -994,8 +994,12 @@ function AdsDashboard({ stats, dialogs, serverAds, serverDialogTotal, serverStat
   }
 
   async function openAdDialogs(adId: string) {
-    if (!communityId || !accessToken) return;
     setSelectedAdId(adId); setDetailStatus("loading"); setDetailError(""); setDetailDialogs([]); setDetailTotal(0); setExpandedPeerId(null);
+    if (!communityId || !accessToken) {
+      setDetailError("Не удалось определить активное сообщество или вход в аккаунт. Обновите страницу.");
+      setDetailStatus("error");
+      return;
+    }
     try {
       const response = await fetch(`/api/ads/dialogs?communityId=${communityId}&adId=${encodeURIComponent(adId)}`, { headers: { authorization: `Bearer ${accessToken}` } });
       const result = await response.json() as { dialogs?: AdDialogDetail[]; total?: number; error?: string };

@@ -23,7 +23,7 @@ export type AiDialogResult = {
 
 type Usage = { inputTokens: number; outputTokens: number; totalTokens: number; estimatedCostUsd: number };
 type RouterPayload = {
-  choices?: Array<{ message?: { content?: string } }>;
+  choices?: Array<{ message?: { content?: string }; finish_reason?: string }>;
   output_text?: string;
   output?: Array<{ content?: Array<{ type?: string; text?: string }> }>;
   usage?: { input_tokens?: number; prompt_tokens?: number; output_tokens?: number; completion_tokens?: number; total_tokens?: number };
@@ -164,7 +164,7 @@ async function routerChat(apiKey: string, model: string, input: unknown, instruc
         if (response.status >= 500) continue;
         break;
       }
-      return { parsed: parseStructuredText(extractText(payload)), usage: usageOf(payload, model), model };
+      return { parsed: parseStructuredText(extractText(payload)), usage: usageOf(payload, model), model, finishReason: payload.choices?.[0]?.finish_reason || "" };
     } catch (error) {
       lastError = error instanceof Error ? error.message : lastError;
       if (error instanceof Error && (error.name === "TimeoutError" || error.name === "AbortError")) break;
@@ -197,6 +197,7 @@ export async function analyzeDialogsWithAi(dialogs: DialogForAi[], sessionApiKey
   let usage: Usage = { inputTokens: 0, outputTokens: 0, totalTokens: 0, estimatedCostUsd: 0 };
   let fallbackCount = 0;
   let failureReason = "";
+  const diagnostics: Array<{ model: string; returned: number; accepted: number; finishReason?: string; error?: string }> = [];
   const apiKey = sessionApiKey || process.env.OPENAI_API_KEY;
   if (!apiKey) throw new Error("На сервере сайта не настроен API-ключ Router Cheap");
   const models = preferredModel && MODEL_PRIORITY.includes(preferredModel)
@@ -224,10 +225,12 @@ export async function analyzeDialogsWithAi(dialogs: DialogForAi[], sessionApiKey
       ].join(" "), 60_000);
         const parsedDialogs = dialogsFromParsed(result.parsed);
         const requestedIds = new Set(remaining.map((dialog) => dialog.peerId));
+        let accepted = 0;
         for (const item of parsedDialogs) {
           const normalized = normalizeAiDialog(item, requestedIds);
-          if (normalized) completed.set(normalized.peerId, normalized);
+          if (normalized) { completed.set(normalized.peerId, normalized); accepted += 1; }
         }
+        diagnostics.push({ model, returned: parsedDialogs.length, accepted, finishReason: result.finishReason });
         if (completed.size) usedModels.add(result.model);
         usage = {
           inputTokens: usage.inputTokens + result.usage.inputTokens,
@@ -237,6 +240,7 @@ export async function analyzeDialogsWithAi(dialogs: DialogForAi[], sessionApiKey
         };
       } catch (error) {
         if (!failureReason) failureReason = readableRouterError(error);
+        diagnostics.push({ model, returned: 0, accepted: 0, error: readableRouterError(error) });
         // Try the next currently available fast model.
       }
     }
@@ -250,6 +254,7 @@ export async function analyzeDialogsWithAi(dialogs: DialogForAi[], sessionApiKey
     analyzedCount: all.length,
     fallbackCount,
     failureReason: all.length ? "" : failureReason,
+    diagnostics,
   };
 }
 

@@ -353,6 +353,8 @@ export default function Home() {
       const reusedPeerIds = new Set<number>();
       const changedPeerIds = new Set<number>();
       let scannedCount = 0;
+      let scanCycles = 0;
+      const visitedOffsets = new Set<number>();
       let newAiAnalyzedCount = 0;
       let newFallbackCount = 0;
       const aiUsage = { inputTokens: 0, outputTokens: 0, totalTokens: 0, estimatedCostUsd: 0 };
@@ -416,9 +418,17 @@ export default function Home() {
       };
 
       while (!done) {
+        scanCycles += 1;
+        if (scanCycles > 500) throw new Error("Анализ остановлен защитой от зацикливания. Обновите страницу и запустите его повторно.");
+        if (totalAvailable !== null && offset >= totalAvailable) break;
+
         const pageOffsets = Array.from({ length: parallelPages }, (_, index) => offset + index * PAGE_SIZE)
           .filter((pageOffset) => totalAvailable === null || pageOffset < totalAvailable);
         if (!pageOffsets.length) break;
+        if (pageOffsets.every((pageOffset) => visitedOffsets.has(pageOffset))) {
+          throw new Error("Анализ остановлен: сервер повторно вернул уже обработанную страницу диалогов.");
+        }
+        pageOffsets.forEach((pageOffset) => visitedOffsets.add(pageOffset));
 
         const pageResults = await Promise.all(pageOffsets.map((pageOffset) => fetchPage(pageOffset, preferredModel)));
         let nextOffset = offset;
@@ -456,11 +466,16 @@ export default function Home() {
           totalAvailable = result.totalConversations ?? totalAvailable;
         }
 
+        if (!done && nextOffset <= offset) {
+          throw new Error("Анализ остановлен: позиция загрузки диалогов перестала изменяться.");
+        }
+        if (totalAvailable !== null && nextOffset >= totalAvailable) done = true;
         offset = nextOffset;
-        setProgress({ processed: scannedCount, total: totalAvailable || 0 });
+        const safeScannedCount = totalAvailable === null ? scannedCount : Math.min(scannedCount, totalAvailable);
+        setProgress({ processed: safeScannedCount, total: totalAvailable || 0 });
         setNotice(incremental
-          ? "Проверено " + scannedCount + " диалогов: " + reusedPeerIds.size + " без повторного ИИ-анализа, " + changedPeerIds.size + " обновлено…"
-          : "Анализ продолжается: обработано " + dialogMap.size + " диалогов за выбранный период…");
+          ? "Проверено " + safeScannedCount + " диалогов: " + reusedPeerIds.size + " без повторного ИИ-анализа, " + changedPeerIds.size + " обновлено…"
+          : "Анализ продолжается: найдено " + dialogMap.size + " диалогов из " + (totalAvailable || "…") + "…");
         parallelPages = 3;
       }
 
@@ -986,7 +1001,7 @@ function AdsDashboard({ stats, dialogs, serverAds, serverDialogTotal, serverStat
   </div>;
 
   if (serverStatus === "loading" || serverStatus === "error" || serverStatus === "ready") return <div className="pageBlock adsPage">
-    <div className="introRow"><div><p className="eyebrow">АТРИБУЦИЯ VK РЕКЛАМЫ</p><h2>Какие источники привели обращения</h2><p>Нажмите на источник, чтобы открыть примеры диалогов и проверить классификацию.</p></div></div>
+    <div className="introRow"><div><p className="eyebrow">АТРИБУЦИЯ VK РЕКЛАМЫ · v3.1</p><h2>Какие источники привели обращения</h2><p>Нажмите на источник, чтобы открыть примеры диалогов и проверить классификацию.</p></div></div>
     {serverStatus==="ready"&&<div className="adDataState">{cabinet?.connected?`Кабинет «Эмалис» подключён · ID ${cabinet.accountId}. Другие рекламные кабинеты к этому сервису пока не подключены.`:"Для выбранного сообщества рекламный кабинет VK Ads не подключён."}</div>}
     {serverStatus==="loading"&&<div className="adDataState">Загружаю статистику объявлений…</div>}
     {serverStatus==="error"&&<div className="adDataState error">Не удалось сверить источники: {serverError}. Сохранённые числа доступны ниже.</div>}
@@ -1000,9 +1015,9 @@ function AdsDashboard({ stats, dialogs, serverAds, serverDialogTotal, serverStat
     {panel}
   </div>;
 
-  if (!stats && !ads.length) return <div className="pageBlock adsPage"><div className="introRow"><div><p className="eyebrow">АТРИБУЦИЯ VK РЕКЛАМЫ</p><h2>Качество диалогов по объявлениям</h2></div><button className="primary" onClick={onAnalyze}>Запустить анализ →</button></div></div>;
+  if (!stats && !ads.length) return <div className="pageBlock adsPage"><div className="introRow"><div><p className="eyebrow">АТРИБУЦИЯ VK РЕКЛАМЫ · v3.1</p><h2>Качество диалогов по объявлениям</h2></div><button className="primary" onClick={onAnalyze}>Запустить анализ →</button></div></div>;
 
-  return <div className="pageBlock adsPage"><div className="introRow"><div><p className="eyebrow">АТРИБУЦИЯ VK РЕКЛАМЫ</p><h2>Качество диалогов по объявлениям</h2></div></div><div className="adsTable card">
+  return <div className="pageBlock adsPage"><div className="introRow"><div><p className="eyebrow">АТРИБУЦИЯ VK РЕКЛАМЫ · v3.1</p><h2>Качество диалогов по объявлениям</h2></div></div><div className="adsTable card">
     <div className="adsHead"><span>Источник VK</span><span>Диалоги</span><span>Интерес</span><span>Покупка</span><span>Телефон</span><span>Потеряны</span><span>Качество</span></div>
     {ads.map((ad)=>{const q=ad.dialogs?Math.round(ad.scoreSum/ad.dialogs):0;return <div className="adsRow" key={ad.adId}><button className="adSourceCell" onClick={()=>openAdDialogs(ad.adId)}><span className="adSource">Из VK Рекламы</span><b>#{ad.adId}</b><small>Открыть диалоги →</small></button><strong>{ad.dialogs}</strong><div><b>{ad.leads}</b><small>{pct(ad.leads,ad.dialogs)}%</small></div><div><b>{ad.purchases||0}</b><small>{pct(ad.purchases||0,ad.dialogs)}%</small></div><div><b>{ad.phones||0}</b><small>{pct(ad.phones||0,ad.dialogs)}%</small></div><div className={ad.lost?"adLost":""}><b>{ad.lost}</b><small>{pct(ad.lost,ad.dialogs)}%</small></div><div className="qualityCell"><b>{q}/100</b><i><em style={{width:`${q}%`}} /></i></div></div>})}
   </div>{panel}</div>;

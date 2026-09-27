@@ -1,5 +1,6 @@
 import { createClient } from "@supabase/supabase-js";
 import { decryptCredential, encryptCredential } from "../../lib/credentials";
+import { publicSupabaseConfig } from "../../lib/supabaseConfig";
 
 type StoredRow = {
   kind: "vk" | "router" | "senler";
@@ -12,9 +13,8 @@ type StoredRow = {
 
 async function authorizedClient(request: Request) {
   const token = request.headers.get("authorization")?.replace(/^Bearer\s+/i, "").trim();
-  const url = process.env.NEXT_PUBLIC_SUPABASE_URL;
-  const key = process.env.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY;
-  if (!token || !url || !key) return null;
+  const { url, publishableKey: key } = publicSupabaseConfig();
+  if (!token) return null;
   const client = createClient(url, key, {
     global: { headers: { Authorization: `Bearer ${token}` } },
     auth: { persistSession: false, autoRefreshToken: false },

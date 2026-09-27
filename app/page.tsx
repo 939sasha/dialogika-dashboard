@@ -355,7 +355,7 @@ export default function Home() {
       let offset = 0;
       let done = false;
       let totalAvailable: number | null = null;
-      const parallelPages = 1;
+      const parallelPages = 2;
       let preferredModel = reusable?.stats.ai.model?.split(",")[0]?.trim() || "";
       let objectionLabels: Record<string, string> = {};
       const dialogMap = new Map<number, LiveDialog>();

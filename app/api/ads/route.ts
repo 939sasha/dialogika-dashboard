@@ -1,6 +1,7 @@
 import { createClient } from "@supabase/supabase-js";
 
-type AdStat = { adId: string; dialogs: number; leads: number; targets: number; purchases?: number; phones?: number; lost: number; scoreSum: number; matched?: boolean; lookupUnavailable?: boolean; lookupReason?: string; matchType?: "banner" | "group" | "campaign"; adName?: string; groupId?: string; groupName?: string; campaignId?: string; campaignName?: string };\ntype AnalysisDialog = { adId?: string | null; purchase?: boolean; goalReached?: boolean; goal?: string; issue?: string; metrics?: { hasPhone?: boolean } };
+type AdStat = { adId: string; dialogs: number; leads: number; targets: number; purchases?: number; phones?: number; lost: number; scoreSum: number; matched?: boolean; lookupUnavailable?: boolean; lookupReason?: string; matchType?: "banner" | "group" | "campaign"; adName?: string; groupId?: string; groupName?: string; campaignId?: string; campaignName?: string };
+type AnalysisDialog = { adId?: string | null; purchase?: boolean; goalReached?: boolean; goal?: string; issue?: string; metrics?: { hasPhone?: boolean } };
 type VkEntity = { id?: number | string; name?: string; campaign_id?: number | string; ad_group_id?: number | string; ad_plan_id?: number | string };
 
 const EMALIS_COMMUNITY_ID = "109534321";

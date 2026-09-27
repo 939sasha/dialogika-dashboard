@@ -1,5 +1,4 @@
 import { createClient } from "@supabase/supabase-js";
-import { decryptCredential } from "../../../lib/credentials";
 import { publicSupabaseConfig } from "../../../lib/supabaseConfig";
 
 const VK_API = "https://api.vk.com/method";
@@ -16,6 +15,7 @@ type StoredDialog = {
   goalReached?: boolean;
   purchase?: boolean;
   metrics?: { hasPhone?: boolean };
+  evidence?: Array<{ role: "Клиент" | "Менеджер"; text: string; date: string }>;
 };
 
 type VkMessage = { id?: number; date?: number; out?: number; text?: string };
@@ -76,9 +76,7 @@ export async function GET(request: Request) {
     .eq("external_id", communityId)
     .maybeSingle();
   if (error) return Response.json({ error: error.message }, { status: 500 });
-  if (!data?.credential_ciphertext) return Response.json({ error: "Сообщество VK не подключено" }, { status: 404 });
-
-  const analysis = data.latest_analysis as { dialogs?: StoredDialog[] } | null;
+  const analysis = data?.latest_analysis as { dialogs?: StoredDialog[] } | null;
   const matched = (analysis?.dialogs || []).filter((dialog) => String(dialog.adId || "") === adId && dialog.peerId);
   const sorted = [...matched].sort((a, b) =>
     Number(purchaseOf(b)) - Number(purchaseOf(a)) ||
@@ -88,11 +86,26 @@ export async function GET(request: Request) {
   const selected = sorted.slice(0, 8);
   if (!selected.length) return Response.json({ dialogs: [], total: matched.length });
 
-  try {
-    const vkToken = await decryptCredential(data.credential_ciphertext);
-    const rows = await Promise.all(selected.map(async (dialog) => {
+  const needsLiveHistory = selected.some((dialog) => !dialog.evidence?.length);
+  let vkToken = "";
+  if (needsLiveHistory) {
+    const { data: credential, error: credentialError } = await client.rpc("dialogika_get_credential", {
+      p_kind: "vk",
+      p_external_id: communityId,
+    });
+    if (!credentialError && typeof credential === "string") vkToken = credential;
+  }
+
+  const rows = await Promise.all(selected.map(async (dialog) => {
+    let messages = (dialog.evidence || []).map((message) => ({
+      ...message,
+      date: message.date ? new Intl.DateTimeFormat("ru-RU", { day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit", timeZone: "Europe/Moscow" }).format(new Date(message.date)) : "",
+    }));
+    let messagesUnavailable = false;
+
+    if (!messages.length && vkToken) {
       const history = await vkHistory(vkToken, communityId, Number(dialog.peerId)).catch(() => []);
-      const messages = [...history]
+      messages = [...history]
         .sort((a, b) => Number(a.date || 0) - Number(b.date || 0))
         .slice(-6)
         .map((message) => ({
@@ -100,19 +113,25 @@ export async function GET(request: Request) {
           text: sanitize(message.text || "[вложение]"),
           date: message.date ? new Intl.DateTimeFormat("ru-RU", { day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit", timeZone: "Europe/Moscow" }).format(new Date(message.date * 1000)) : "",
         }));
-      return {
-        peerId: Number(dialog.peerId),
-        status: dialog.status || "Не определён",
-        score: Number(dialog.score || 0),
-        issue: dialog.issue || "",
-        goal: dialog.goal || "",
-        purchase: purchaseOf(dialog),
-        phone: Boolean(dialog.metrics?.hasPhone),
-        messages,
-      };
-    }));
-    return Response.json({ dialogs: rows, total: matched.length });
-  } catch (error) {
-    return Response.json({ error: error instanceof Error ? error.message : "Не удалось загрузить диалоги" }, { status: 500 });
-  }
+    }
+    if (!messages.length) messagesUnavailable = true;
+
+    return {
+      peerId: Number(dialog.peerId),
+      status: dialog.status || "Не определён",
+      score: Number(dialog.score || 0),
+      issue: dialog.issue || "",
+      goal: dialog.goal || "",
+      purchase: purchaseOf(dialog),
+      phone: Boolean(dialog.metrics?.hasPhone),
+      messages,
+      messagesUnavailable,
+    };
+  }));
+
+  return Response.json({
+    dialogs: rows,
+    total: matched.length,
+    liveHistoryAvailable: Boolean(vkToken),
+  });
 }

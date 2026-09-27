@@ -5,10 +5,11 @@ import { createClient, SupabaseClient, User } from "@supabase/supabase-js";
 
 type Period = "30" | "60" | "90";
 type Community = { id: number; name: string; photo: string | null };
-type StoredAnalysis = { stats: LiveStats; dialogs: LiveDialog[]; period: Period; savedAt?: string };
+type StoredAnalysis = { stats: LiveStats; dialogs: LiveDialog[]; period: Period; savedAt?: string; version?: 2 };
 type SavedCommunity = Community & { token: string; latestAnalysis?: StoredAnalysis | LiveStats | null };
 type SavedSenlerConnection = { communityId: number; name: string; photo: string | null; key: string };
-type LiveDialog = { peerId: number; adId?: string | null; score: number; status: string; issue: string; intent?: string; goal?: string; nuance?: string; recommendation?: string; betterReply?: string; confidence?: number; objections?: string[] };
+type DialogMetrics = { hasPhone: boolean; hasInterest: boolean; responseSum: number; responseCount: number; slowResponse: boolean; noNextStep: boolean; unanswered: boolean; firstEverDate: number | null; objectionKeys: string[] };
+type LiveDialog = { peerId: number; adId?: string | null; score: number; status: string; issue: string; intent?: string; goal?: string; goalReached?: boolean; nuance?: string; recommendation?: string; betterReply?: string; confidence?: number; objections?: string[]; revision?: string; lastMessageId?: number; lastMessageDate?: number; metrics?: DialogMetrics; aiAnalyzed?: boolean; aiModel?: string };
 type AdStat = { adId: string; dialogs: number; leads: number; targets: number; lost: number; scoreSum: number; matched?: boolean; lookupUnavailable?: boolean; lookupReason?: string; matchType?: "banner" | "group" | "campaign"; adName?: string; groupId?: string; groupName?: string; campaignId?: string; campaignName?: string };
 type LiveStats = {
   dialogs: number; leads: number; contacts: number; targets: number; lost: number;
@@ -20,7 +21,7 @@ type LiveStats = {
   dailyNew: Array<{ date: string; count: number }>;
   ads: AdStat[];
   priority: "speed" | "objections" | "balanced";
-  ai: { model: string; analyzedCount: number; fallbackCount: number; inputTokens: number; outputTokens: number; totalTokens: number; estimatedCostUsd: number; nuances: string[]; recommendations: string[] };
+  ai: { model: string; analyzedCount: number; fallbackCount: number; inputTokens: number; outputTokens: number; totalTokens: number; estimatedCostUsd: number; nuances: string[]; recommendations: string[]; reusedCount?: number; changedCount?: number };
 };
 
 export default function Home() {
@@ -225,7 +226,7 @@ export default function Home() {
   function selectCommunity(item: SavedCommunity) {
     setCommunity({ id: item.id, name: item.name, photo: item.photo });
     setToken(item.token);
-    restoreAnalysis(item.latestAnalysis);
+    restoreAnalysis(newerAnalysis(item.latestAnalysis, cachedAnalysis(item.id)));
     localStorage.setItem("dialogika.activeCommunity.v1", String(item.id));
     setNotice(`Выбрано сообщество «${item.name}».`);
   }
@@ -301,6 +302,7 @@ export default function Home() {
       setToken("");
       localStorage.removeItem("dialogika.activeCommunity.v1");
     }
+    localStorage.removeItem("dialogika.analysis." + community.id + ".v2");
     setLiveStats(null);
     setLiveDialogs([]);
     setNotice("Сообщество удалено из вашего аккаунта.");
@@ -317,26 +319,43 @@ export default function Home() {
       setNotice("Подключите Router Cheap в разделе «Настройки», затем запустите анализ ещё раз.");
       return;
     }
+
+    const savedFromAccount = connections.find((item) => item.id === community.id)?.latestAnalysis;
+    const previous = newerAnalysis(savedFromAccount, cachedAnalysis(community.id));
+    const reusable = previous && "stats" in previous && previous.version === 2 ? previous : null;
+    const reusableDialogs = new Map<number, LiveDialog>();
+    for (const dialog of reusable?.dialogs || []) {
+      if (dialog.revision && dialog.metrics) reusableDialogs.set(dialog.peerId, dialog);
+    }
+    const knownRevisions = Object.fromEntries(
+      [...reusableDialogs.values()].map((dialog) => [String(dialog.peerId), dialog.revision as string]),
+    );
+    const incremental = reusableDialogs.size > 0;
+
     setBusy(true);
     setLiveStats(null);
     setLiveDialogs([]);
     setProgress({ processed: 0, total: 0 });
-    setNotice(`Загружаю все переписки сообщества «${community.name}» за ${period} дней…`);
+    setNotice(incremental
+      ? "Проверяю новые и изменённые переписки сообщества «" + community.name + "» за " + period + " дней…"
+      : "Загружаю все переписки сообщества «" + community.name + "» за " + period + " дней…");
+
     try {
+      const PAGE_SIZE = 3;
       let offset = 0;
       let done = false;
-      const totals = { dialogs: 0, leads: 0, contacts: 0, targets: 0, lost: 0, responseSum: 0, responseCount: 0, slowResponse: 0, noNextStep: 0, unanswered: 0 };
-      const objectionTotals: Record<string, number> = {};
-      const dailyTotals: Record<string, number> = {};
-      let objectionLabels: Record<string, string> = {};
-      let objectionDialogs = 0;
-      const analyzedDialogs: LiveDialog[] = [];
-      const adTotals: Record<string, AdStat> = {};
-      const aiTotals = { model: "", analyzedCount: 0, fallbackCount: 0, inputTokens: 0, outputTokens: 0, totalTokens: 0, estimatedCostUsd: 0, nuances: [] as string[], recommendations: [] as string[] };
-      const aiModels = new Set<string>();
-      let preferredModel = "";
-      let parallelPages = 1;
       let totalAvailable: number | null = null;
+      let parallelPages = incremental ? 3 : 2;
+      let preferredModel = reusable?.stats.ai.model?.split(",")[0]?.trim() || "";
+      let objectionLabels: Record<string, string> = {};
+      const dialogMap = new Map<number, LiveDialog>();
+      const reusedPeerIds = new Set<number>();
+      const changedPeerIds = new Set<number>();
+      let scannedCount = 0;
+      let newAiAnalyzedCount = 0;
+      let newFallbackCount = 0;
+      const aiUsage = { inputTokens: 0, outputTokens: 0, totalTokens: 0, estimatedCostUsd: 0 };
+
       const fetchPage = async (pageOffset: number, model: string) => {
         let response: Response | null = null;
         let responseText = "";
@@ -345,7 +364,16 @@ export default function Home() {
             response = await fetch("/api/vk/analyze", {
               method: "POST",
               headers: { "content-type": "application/json" },
-              body: JSON.stringify({ token, openaiKey, senlerCredential: senlerConnections.find((item) => item.communityId === community.id)?.key || "", preferredModel: model, groupId: community.id, days: Number(period), offset: pageOffset }),
+              body: JSON.stringify({
+                token,
+                openaiKey,
+                senlerCredential: senlerConnections.find((item) => item.communityId === community.id)?.key || "",
+                preferredModel: model,
+                groupId: community.id,
+                days: Number(period),
+                offset: pageOffset,
+                knownRevisions,
+              }),
             });
             responseText = await response.text();
             if (response.ok || response.status < 500 || response.status === 524 || attempt === 1) break;
@@ -356,20 +384,23 @@ export default function Home() {
                 : error instanceof Error ? error.message : "Сервер анализа не ответил");
             }
           }
-          setNotice(`Сервер задержал пачку. Повторная попытка ${attempt + 2} из 2…`);
+          setNotice("Сервер задержал пачку. Повторная попытка " + (attempt + 2) + " из 2…");
           await new Promise((resolve) => setTimeout(resolve, 1200 * (attempt + 1)));
         }
         if (!response) throw new Error("Сервер анализа не ответил");
+
         let result: {
           stats?: { dialogs: number; leads: number; contacts: number; targets: number; lost: number; responseSum: number; responseCount: number };
-          problems?: { slowResponse: number; noNextStep: number; unanswered: number };
-          goalCounts?: Record<string, number>; goalLabels?: Record<string, string>;
-          objectionCounts?: Record<string, number>; objectionLabels?: Record<string, string>;
-          objectionDialogs?: number; dailyNew?: Record<string, number>;
-          ads?: AdStat[];
-          ai?: { enabled: boolean; model: string; analyzedCount: number; fallbackCount: number; usage: { inputTokens: number; outputTokens: number; totalTokens: number; estimatedCostUsd: number }; goals: Record<string, number>; nuances: string[]; recommendations: string[] };
+          objectionLabels?: Record<string, string>;
+          ai?: { enabled: boolean; model: string; analyzedCount: number; fallbackCount: number; usage: { inputTokens: number; outputTokens: number; totalTokens: number; estimatedCostUsd: number } };
           dialogs?: LiveDialog[];
-          done?: boolean; nextOffset?: number; totalConversations?: number; error?: string;
+          unchangedPeerIds?: number[];
+          pageDialogs?: number;
+          changedDialogs?: number;
+          done?: boolean;
+          nextOffset?: number;
+          totalConversations?: number;
+          error?: string;
         };
         try {
           result = JSON.parse(responseText) as typeof result;
@@ -377,64 +408,110 @@ export default function Home() {
           const cloudflareCode = responseText.match(/error code:\s*(\d+)/i)?.[1];
           throw new Error(cloudflareCode === "524"
             ? "Сервер не успел обработать пачку диалогов. Повторите запуск — размер пачек уже уменьшен."
-            : `Сервер вернул некорректный ответ${response.status ? ` (${response.status})` : ""}.`);
+            : "Сервер вернул некорректный ответ" + (response.status ? " (" + response.status + ")" : "") + ".");
         }
         if (!response.ok || !result.stats) throw new Error(result.error || "Анализ не завершён");
         return result;
       };
+
       while (!done) {
-        const pageOffsets = Array.from({ length: parallelPages }, (_, index) => offset + index * 3)
+        const pageOffsets = Array.from({ length: parallelPages }, (_, index) => offset + index * PAGE_SIZE)
           .filter((pageOffset) => totalAvailable === null || pageOffset < totalAvailable);
+        if (!pageOffsets.length) break;
+
         const pageResults = await Promise.all(pageOffsets.map((pageOffset) => fetchPage(pageOffset, preferredModel)));
+        let nextOffset = offset;
+
         for (const result of pageResults) {
-          if (done) break;
-        const pageStats = result.stats;
-        if (!pageStats) throw new Error("Сервер вернул пачку без статистики");
-        totals.dialogs += pageStats.dialogs;
-        totals.leads += pageStats.leads;
-        totals.contacts += pageStats.contacts;
-        totals.targets += pageStats.targets;
-        totals.lost += pageStats.lost;
-        totals.responseSum += pageStats.responseSum;
-        totals.responseCount += pageStats.responseCount;
-        totals.slowResponse += result.problems?.slowResponse || 0;
-        totals.noNextStep += result.problems?.noNextStep || 0;
-        totals.unanswered += result.problems?.unanswered || 0;
-        for (const [key, count] of Object.entries(result.objectionCounts || {})) objectionTotals[key] = (objectionTotals[key] || 0) + count;
-        for (const [date, count] of Object.entries(result.dailyNew || {})) dailyTotals[date] = (dailyTotals[date] || 0) + count;
-        objectionLabels = result.objectionLabels || objectionLabels;
-        objectionDialogs += result.objectionDialogs || 0;
-        for (const ad of result.ads || []) {
-          const current = adTotals[ad.adId] || { adId: ad.adId, dialogs: 0, leads: 0, targets: 0, lost: 0, scoreSum: 0 };
-          current.dialogs += ad.dialogs;
-          current.leads += ad.leads;
-          current.targets += ad.targets;
-          current.lost += ad.lost;
-          current.scoreSum += ad.scoreSum;
-          adTotals[ad.adId] = current;
+          objectionLabels = result.objectionLabels || objectionLabels;
+          scannedCount += result.pageDialogs ?? ((result.unchangedPeerIds?.length || 0) + (result.dialogs?.length || 0));
+
+          for (const peerId of result.unchangedPeerIds || []) {
+            const cached = reusableDialogs.get(peerId);
+            if (!cached) continue;
+            dialogMap.set(peerId, cached);
+            reusedPeerIds.add(peerId);
+          }
+
+          for (const dialog of result.dialogs || []) {
+            dialogMap.set(dialog.peerId, dialog);
+            changedPeerIds.add(dialog.peerId);
+            reusedPeerIds.delete(dialog.peerId);
+          }
+
+          if (!result.ai?.enabled) throw new Error("ИИ-анализ не запущен: не подключён API Router Cheap.");
+          if (result.ai.analyzedCount && result.ai.model && result.ai.model !== "резервный алгоритм") {
+            preferredModel = result.ai.model.split(",")[0].trim();
+          }
+          newAiAnalyzedCount += result.ai.analyzedCount || 0;
+          newFallbackCount += result.ai.fallbackCount || 0;
+          aiUsage.inputTokens += result.ai.usage.inputTokens || 0;
+          aiUsage.outputTokens += result.ai.usage.outputTokens || 0;
+          aiUsage.totalTokens += result.ai.usage.totalTokens || 0;
+          aiUsage.estimatedCostUsd += result.ai.usage.estimatedCostUsd || 0;
+
+          nextOffset = Math.max(nextOffset, result.nextOffset ?? nextOffset);
+          done = done || Boolean(result.done);
+          totalAvailable = result.totalConversations ?? totalAvailable;
         }
-        if (!result.ai?.enabled) throw new Error("ИИ-анализ не запущен: не подключён API Router Cheap.");
-        if (result.ai.analyzedCount && result.ai.model !== "резервный алгоритм") preferredModel = result.ai.model.split(",")[0].trim();
-        aiTotals.model = result.ai.model;
-        if (result.ai.model !== "резервный алгоритм") result.ai.model.split(",").forEach((model) => aiModels.add(model.trim()));
-        aiTotals.analyzedCount += result.ai.analyzedCount || 0;
-        aiTotals.fallbackCount += result.ai.fallbackCount || 0;
-        aiTotals.inputTokens += result.ai.usage.inputTokens;
-        aiTotals.outputTokens += result.ai.usage.outputTokens;
-        aiTotals.totalTokens += result.ai.usage.totalTokens;
-        aiTotals.estimatedCostUsd += result.ai.usage.estimatedCostUsd;
-        aiTotals.nuances.push(...result.ai.nuances);
-        aiTotals.recommendations.push(...result.ai.recommendations);
-        analyzedDialogs.push(...(result.dialogs || []));
-        offset = result.nextOffset ?? offset;
-        done = Boolean(result.done);
-        totalAvailable = result.totalConversations ?? totalAvailable;
-        setProgress({ processed: totals.dialogs, total: result.totalConversations || 0 });
-        setNotice(`Анализ продолжается: обработано ${totals.dialogs} диалогов за выбранный период…`);
-        }
-        parallelPages = 2;
+
+        offset = nextOffset;
+        setProgress({ processed: scannedCount, total: totalAvailable || 0 });
+        setNotice(incremental
+          ? "Проверено " + scannedCount + " диалогов: " + reusedPeerIds.size + " без повторного ИИ-анализа, " + changedPeerIds.size + " обновлено…"
+          : "Анализ продолжается: обработано " + dialogMap.size + " диалогов за выбранный период…");
+        parallelPages = 3;
       }
-      if (totals.dialogs > 0 && aiTotals.analyzedCount === 0) throw new Error("Router Cheap не обработал ни одного диалога. Предыдущий отчёт сохранён; проверьте ключ и статус моделей в настройках.");
+
+      if (changedPeerIds.size > 0 && newAiAnalyzedCount === 0) {
+        throw new Error("Router Cheap не обработал ни одного изменённого диалога. Предыдущий отчёт сохранён; проверьте ключ и статус моделей в настройках.");
+      }
+
+      const analyzedDialogs = [...dialogMap.values()]
+        .filter((dialog) => Boolean(dialog.metrics))
+        .sort((a, b) => (b.lastMessageDate || 0) - (a.lastMessageDate || 0));
+      const cutoff = Math.floor(Date.now() / 1000) - Number(period) * 86400;
+      const totals = { dialogs: analyzedDialogs.length, leads: 0, contacts: 0, targets: 0, lost: 0, responseSum: 0, responseCount: 0, slowResponse: 0, noNextStep: 0, unanswered: 0 };
+      const objectionTotals: Record<string, number> = {};
+      const dailyTotals: Record<string, number> = {};
+      const adTotals: Record<string, AdStat> = {};
+      let objectionDialogs = 0;
+
+      for (const dialog of analyzedDialogs) {
+        const metrics = dialog.metrics as DialogMetrics;
+        const lead = dialog.aiAnalyzed === false ? metrics.hasInterest : dialog.status !== "Не лид";
+        const target = dialog.goalReached ?? dialog.status === "Успешно";
+        const lost = dialog.status === "Потерян";
+
+        totals.leads += Number(lead);
+        totals.contacts += Number(metrics.hasPhone);
+        totals.targets += Number(target);
+        totals.lost += Number(lost);
+        totals.responseSum += metrics.responseSum || 0;
+        totals.responseCount += metrics.responseCount || 0;
+        totals.slowResponse += Number(metrics.slowResponse);
+        totals.noNextStep += Number(metrics.noNextStep);
+        totals.unanswered += Number(metrics.unanswered);
+
+        if (metrics.objectionKeys.length) objectionDialogs += 1;
+        for (const key of metrics.objectionKeys) objectionTotals[key] = (objectionTotals[key] || 0) + 1;
+
+        if (metrics.firstEverDate && metrics.firstEverDate >= cutoff) {
+          const day = new Date((metrics.firstEverDate + 3 * 3600) * 1000).toISOString().slice(0, 10);
+          dailyTotals[day] = (dailyTotals[day] || 0) + 1;
+        }
+
+        if (dialog.adId) {
+          const current = adTotals[dialog.adId] || { adId: dialog.adId, dialogs: 0, leads: 0, targets: 0, lost: 0, scoreSum: 0 };
+          current.dialogs += 1;
+          current.leads += Number(lead);
+          current.targets += Number(target);
+          current.lost += Number(lost);
+          current.scoreSum += dialog.score || 0;
+          adTotals[dialog.adId] = current;
+        }
+      }
+
       const recoverableLow = Math.round(totals.lost * 0.25);
       const recoverableHigh = Math.round(totals.lost * 0.55);
       const midpoint = (recoverableLow + recoverableHigh) / 2;
@@ -444,11 +521,28 @@ export default function Home() {
         : objectionDialogs > totals.slowResponse * 1.2
           ? "objections" as const
           : "balanced" as const;
+      const aiModels = new Set<string>();
+      for (const dialog of analyzedDialogs) {
+        if (!dialog.aiAnalyzed || !dialog.aiModel) continue;
+        dialog.aiModel.split(",").map((model) => model.trim()).filter(Boolean).forEach((model) => aiModels.add(model));
+      }
+      const totalAiAnalyzed = analyzedDialogs.filter((dialog) => dialog.aiAnalyzed !== false).length;
+      const totalFallback = analyzedDialogs.length - totalAiAnalyzed;
+
       const completedStats: LiveStats = {
-        dialogs: totals.dialogs, leads: totals.leads, contacts: totals.contacts, targets: totals.targets,
-        lost: totals.lost, averageResponse: totals.responseCount ? Math.round(totals.responseSum / totals.responseCount) : 0,
-        recoverableLow, recoverableHigh, goal: "Запись или покупка",
-        growth, slowResponse: totals.slowResponse, noNextStep: totals.noNextStep, unanswered: totals.unanswered,
+        dialogs: totals.dialogs,
+        leads: totals.leads,
+        contacts: totals.contacts,
+        targets: totals.targets,
+        lost: totals.lost,
+        averageResponse: totals.responseCount ? Math.round(totals.responseSum / totals.responseCount) : 0,
+        recoverableLow,
+        recoverableHigh,
+        goal: "Запись или покупка",
+        growth,
+        slowResponse: totals.slowResponse,
+        noNextStep: totals.noNextStep,
+        unanswered: totals.unanswered,
         responseMeasured: totals.responseCount > 0,
         objections: Object.entries(objectionTotals)
           .map(([key, count]) => ({ key, label: objectionLabels[key] || key, count }))
@@ -458,12 +552,32 @@ export default function Home() {
         dailyNew: Object.entries(dailyTotals).map(([date, count]) => ({ date, count })).sort((a, b) => a.date.localeCompare(b.date)),
         ads: Object.values(adTotals).sort((a, b) => b.dialogs - a.dialogs),
         priority,
-        ai: { ...aiTotals, model: [...aiModels].join(", ") || "резервный алгоритм", nuances: [...new Set(aiTotals.nuances)].slice(0, 6), recommendations: [...new Set(aiTotals.recommendations)].slice(0, 6) },
+        ai: {
+          model: [...aiModels].join(", ") || reusable?.stats.ai.model || "резервный алгоритм",
+          analyzedCount: totalAiAnalyzed,
+          fallbackCount: totalFallback,
+          inputTokens: aiUsage.inputTokens,
+          outputTokens: aiUsage.outputTokens,
+          totalTokens: aiUsage.totalTokens,
+          estimatedCostUsd: aiUsage.estimatedCostUsd,
+          nuances: [...new Set(analyzedDialogs.map((dialog) => dialog.nuance).filter((value): value is string => Boolean(value)))].slice(0, 6),
+          recommendations: [...new Set(analyzedDialogs.map((dialog) => dialog.recommendation).filter((value): value is string => Boolean(value)))].slice(0, 6),
+          reusedCount: reusedPeerIds.size,
+          changedCount: changedPeerIds.size,
+        },
       };
+
       setLiveStats(completedStats);
       setLiveDialogs(analyzedDialogs);
       setTab("Обзор");
-      const storedAnalysis: StoredAnalysis = { stats: completedStats, dialogs: analyzedDialogs, period, savedAt: new Date().toISOString() };
+
+      const storedAnalysis: StoredAnalysis = {
+        stats: completedStats,
+        dialogs: analyzedDialogs,
+        period,
+        savedAt: new Date().toISOString(),
+        version: 2,
+      };
       setConnections((current) => current.map((item) => item.id === community.id ? { ...item, latestAnalysis: storedAnalysis } : item));
       cacheAnalysis(community.id, storedAnalysis);
 
@@ -472,17 +586,26 @@ export default function Home() {
         const accountAnalysis = fitStoredAnalysis(storedAnalysis, ACCOUNT_ANALYSIS_MAX_CHARS);
         await saveSetting({ kind: "vk", externalId: String(community.id), name: community.name, photo: community.photo, latestAnalysis: accountAnalysis }, accessToken);
         if (accountAnalysis.dialogs.length < storedAnalysis.dialogs.length) {
-          saveWarning = ` В аккаунте сохранена статистика и ${accountAnalysis.dialogs.length} из ${storedAnalysis.dialogs.length} карточек диалогов; полный текущий результат оставлен в этом браузере.`;
+          saveWarning = " В аккаунте сохранена статистика и " + accountAnalysis.dialogs.length + " из " + storedAnalysis.dialogs.length + " карточек диалогов; полный текущий результат оставлен в этом браузере.";
         }
       } catch {
         saveWarning = " Анализ завершён и показан, но сервер не смог сохранить копию результата в аккаунт. В этом браузере результат сохранён локально.";
       }
 
-      setNotice((aiTotals.fallbackCount
-        ? `Частичный анализ: ИИ обработал ${aiTotals.analyzedCount} из ${totals.dialogs} диалогов. Для ${aiTotals.fallbackCount} применены формальные признаки; эти выводы требуют проверки.`
-        : `Готово: ИИ обработал все ${totals.dialogs} активных диалогов за ${period} дней. Использовано ${aiTotals.totalTokens.toLocaleString("ru-RU")} токенов.`) + saveWarning);
+      let successMessage = "";
+      if (incremental && changedPeerIds.size === 0) {
+        successMessage = "Готово: проверено " + totals.dialogs + " диалогов. Изменений нет — повторный ИИ-анализ не понадобился, токены Router Cheap не потрачены.";
+      } else if (incremental) {
+        successMessage = "Готово: проверено " + totals.dialogs + " диалогов; " + reusedPeerIds.size + " использовано из кэша, " + changedPeerIds.size + " обновлено. В последнем запуске использовано " + aiUsage.totalTokens.toLocaleString("ru-RU") + " токенов.";
+      } else {
+        successMessage = "Готово: ИИ обработал " + totalAiAnalyzed + " из " + totals.dialogs + " активных диалогов за " + period + " дней. Использовано " + aiUsage.totalTokens.toLocaleString("ru-RU") + " токенов.";
+      }
+      if (newFallbackCount > 0) {
+        successMessage += " Для " + newFallbackCount + " изменённых диалогов применены формальные признаки; эти выводы требуют проверки.";
+      }
+      setNotice(successMessage + saveWarning);
     } catch (error) {
-      restoreAnalysis(connections.find((item) => item.id === community.id)?.latestAnalysis);
+      restoreAnalysis(previous);
       setNotice(error instanceof Error ? error.message : "Ошибка анализа");
     } finally {
       setBusy(false);

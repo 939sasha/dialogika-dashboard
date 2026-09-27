@@ -163,6 +163,11 @@ function adIdFromMessage(message: VkMessage) {
   return /^\d{5,}$/.test(ref) ? ref : null;
 }
 
+function messageRevision(message?: VkMessage) {
+  if (!message?.id || !message.date) return "";
+  return [message.id, message.date].join(":");
+}
+
 function analyzeDialog(messages: VkMessage[]) {
   const chronological = [...messages].sort((a, b) => a.date - b.date);
   const text = chronological.map((m) => m.text || "").join(" ");
@@ -199,13 +204,20 @@ function analyzeDialog(messages: VkMessage[]) {
   const poorNextStep = hasInterest && !hasGoal;
   const lost = unanswered && hasInterest && !hasGoal;
   const score = Math.max(20, 100 - (slow ? 25 : 0) - (unanswered ? 25 : 0) - (poorNextStep ? 20 : 0) - (!outbound.length ? 30 : 0));
-  return { hasPhone, hasGoal, hasInterest, lost, unanswered, slow, poorNextStep, averageResponse, score, goalCounts, objectionCounts };
+  return { hasPhone, hasGoal, hasInterest, lost, unanswered, slow, poorNextStep, averageResponse, responseSum: responseTimes.reduce((a, b) => a + b, 0), responseCount: responseTimes.length, score, goalCounts, objectionCounts };
 }
 
 export async function POST(request: Request) {
   try {
-    const { token, openaiKey, senlerCredential, preferredModel, groupId, days = 30, offset = 0 } = await request.json() as {
-      token?: string; openaiKey?: string; senlerCredential?: string; preferredModel?: string; groupId?: number; days?: number; offset?: number;
+    const { token, openaiKey, senlerCredential, preferredModel, groupId, days = 30, offset = 0, knownRevisions = {} } = await request.json() as {
+      token?: string;
+      openaiKey?: string;
+      senlerCredential?: string;
+      preferredModel?: string;
+      groupId?: number;
+      days?: number;
+      offset?: number;
+      knownRevisions?: Record<string, string>;
     };
     if (!token || !groupId || ![30, 60, 90].includes(days) || offset < 0) {
       return Response.json({ error: "Некорректные параметры анализа" }, { status: 400 });
@@ -221,26 +233,67 @@ export async function POST(request: Request) {
     const items = conversations.items || [];
     const active = items.filter((item) => (item.last_message?.date || 0) >= cutoff);
     const reachedCutoff = active.length < items.length;
-    const rows: Array<ReturnType<typeof analyzeDialog> & { peerId: number; firstEverDate: number | null; transcript: string; adId: string | null }> = [];
 
+    type AnalysisRow = ReturnType<typeof analyzeDialog> & {
+      peerId: number;
+      firstEverDate: number | null;
+      transcript: string;
+      adId: string | null;
+      revision: string;
+      lastMessageId: number;
+      lastMessageDate: number;
+    };
+
+    const unchangedPeerIds: number[] = [];
+    const changedItems: Array<{ peerId: number; revision: string; lastMessage: VkMessage }> = [];
     for (const item of active) {
       const peerId = item.conversation?.peer?.id;
-      if (!peerId) continue;
-      const history = await getHistory(token, groupId, peerId, cutoff);
-      if (history.messages.length) rows.push({ peerId, firstEverDate: history.firstEverDate, adId: history.adId, transcript: sanitizedTranscript(history.messages), ...analyzeDialog(history.messages) });
+      const lastMessage = item.last_message;
+      if (!peerId || !lastMessage) continue;
+      const revision = messageRevision(lastMessage);
+      if (revision && knownRevisions[String(peerId)] === revision) {
+        unchangedPeerIds.push(peerId);
+        continue;
+      }
+      changedItems.push({ peerId, revision, lastMessage });
     }
+
+    const rawRows = await Promise.all(changedItems.map(async ({ peerId, revision, lastMessage }) => {
+      const history = await getHistory(token, groupId, peerId, cutoff);
+      if (!history.messages.length) return null;
+      return {
+        peerId,
+        firstEverDate: history.firstEverDate,
+        adId: history.adId,
+        transcript: sanitizedTranscript(history.messages),
+        revision,
+        lastMessageId: lastMessage.id,
+        lastMessageDate: lastMessage.date,
+        ...analyzeDialog(history.messages),
+      } satisfies AnalysisRow;
+    }));
+    const rows = rawRows.filter((row): row is AnalysisRow => row !== null);
 
     const senlerAds = await getSenlerAds(parseSenlerCredential(senlerCredential), rows.map((row) => row.peerId));
     for (const row of rows) if (!row.adId) row.adId = senlerAds.get(row.peerId) || null;
 
-    const aiResult = await analyzeDialogsWithAi(rows.map((row) => ({
-      peerId: row.peerId,
-      transcript: row.transcript,
-      averageResponse: row.averageResponse,
-      slow: row.slow,
-      unanswered: row.unanswered,
-    })), openaiKey, preferredModel);
+    const aiResult = rows.length
+      ? await analyzeDialogsWithAi(rows.map((row) => ({
+          peerId: row.peerId,
+          transcript: row.transcript,
+          averageResponse: row.averageResponse,
+          slow: row.slow,
+          unanswered: row.unanswered,
+        })), openaiKey, preferredModel)
+      : {
+          dialogs: [],
+          usage: { inputTokens: 0, outputTokens: 0, totalTokens: 0, estimatedCostUsd: 0 },
+          model: "",
+          analyzedCount: 0,
+          fallbackCount: 0,
+        };
     const aiByPeer = new Map(aiResult.dialogs.map((dialog) => [dialog.peerId, dialog]));
+
     const ads = new Map<string, { adId: string; dialogs: number; leads: number; targets: number; lost: number; scoreSum: number }>();
     for (const row of rows) {
       if (!row.adId) continue;
@@ -253,12 +306,11 @@ export async function POST(request: Request) {
       current.scoreSum += aiDialog?.score ?? row.score;
       ads.set(row.adId, current);
     }
+
     const aiGoals = aiResult.dialogs.reduce<Record<string, number>>((acc, dialog) => {
       if (dialog.goal && dialog.goal !== "не определена") acc[dialog.goal] = (acc[dialog.goal] || 0) + 1;
       return acc;
     }, {});
-
-    const responseSeconds = rows.flatMap((r) => r.averageResponse === null ? [] : [r.averageResponse]);
     const goalCounts = Object.fromEntries(Object.keys(GOALS).map((key) => [
       key,
       rows.reduce((sum, row) => sum + row.goalCounts[key as GoalKey], 0),
@@ -282,16 +334,19 @@ export async function POST(request: Request) {
       done: reachedCutoff || items.length < BATCH_SIZE || offset + items.length >= (conversations.count || 0),
       nextOffset: offset + items.length,
       totalConversations: conversations.count || 0,
+      pageDialogs: active.length,
+      changedDialogs: rows.length,
+      unchangedPeerIds,
       goalLabels: Object.fromEntries(Object.entries(GOALS).map(([key, value]) => [key, value.label])),
       objectionLabels: Object.fromEntries(Object.entries(OBJECTIONS).map(([key, value]) => [key, value.label])),
       stats: {
         dialogs: rows.length,
         leads,
-        contacts: rows.filter((r) => r.hasPhone).length,
+        contacts: rows.filter((row) => row.hasPhone).length,
         targets,
         lost,
-        responseSum: responseSeconds.reduce((a, b) => a + b, 0),
-        responseCount: responseSeconds.length,
+        responseSum: rows.reduce((sum, row) => sum + row.responseSum, 0),
+        responseCount: rows.reduce((sum, row) => sum + row.responseCount, 0),
       },
       goalCounts,
       objectionCounts,
@@ -309,15 +364,32 @@ export async function POST(request: Request) {
         recommendations: aiResult.dialogs.map((dialog) => dialog.recommendation).filter(Boolean),
       },
       problems: {
-        slowResponse: rows.filter((r) => r.slow).length,
-        noNextStep: rows.filter((r) => r.poorNextStep).length,
-        unanswered: rows.filter((r) => r.unanswered).length,
+        slowResponse: rows.filter((row) => row.slow).length,
+        noNextStep: rows.filter((row) => row.poorNextStep).length,
+        unanswered: rows.filter((row) => row.unanswered).length,
       },
       dialogs: rows.map((row) => {
         const ai = aiByPeer.get(row.peerId);
         return {
           peerId: row.peerId,
           adId: row.adId,
+          revision: row.revision,
+          lastMessageId: row.lastMessageId,
+          lastMessageDate: row.lastMessageDate,
+          goalReached: ai?.goalReached ?? row.hasGoal,
+          aiAnalyzed: Boolean(ai),
+          aiModel: ai ? aiResult.model : "",
+          metrics: {
+            hasPhone: row.hasPhone,
+            hasInterest: row.hasInterest,
+            responseSum: row.responseSum,
+            responseCount: row.responseCount,
+            slowResponse: row.slow,
+            noNextStep: row.poorNextStep,
+            unanswered: row.unanswered,
+            firstEverDate: row.firstEverDate,
+            objectionKeys: Object.entries(row.objectionCounts).filter(([, count]) => count > 0).map(([key]) => key),
+          },
           score: ai?.score ?? row.score,
           status: ai?.status ?? (row.lost ? "Потерян" : row.hasGoal ? "Успешно" : "Риск"),
           issue: ai?.issue ?? (row.slow ? "Долгий ответ" : row.unanswered ? "Нет ответа" : row.poorNextStep ? "Не предложен следующий шаг" : "Цель достигнута"),

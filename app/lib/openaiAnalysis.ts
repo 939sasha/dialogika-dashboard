@@ -179,11 +179,18 @@ function normalizeAiDialog(value: unknown, expectedIds: Set<number>): AiDialogRe
   const peerId = Number(dialog.peerId);
   const score = Number(dialog.score);
   const confidence = Number(dialog.confidence);
-  const status = dialog.status;
-  if (!expectedIds.has(peerId) || !["Успешно", "Риск", "Потерян", "Не лид"].includes(String(status)) ||
+  const rawStatus = String(dialog.status || "").toLowerCase();
+  const status: AiDialogResult["status"] = dialog.goalReached === true
+    ? "Успешно"
+    : /не лид|нецелев|спам/.test(rawStatus)
+      ? "Не лид"
+      : /потерян|отказ|уш[её]л/.test(rawStatus)
+        ? "Потерян"
+        : "Риск";
+  if (!expectedIds.has(peerId) ||
     typeof dialog.goalReached !== "boolean" || !Number.isFinite(score) || !Number.isFinite(confidence)) return null;
   return {
-    peerId, status: status as AiDialogResult["status"], goalReached: dialog.goalReached,
+    peerId, status, goalReached: dialog.goalReached,
     score: Math.max(0, Math.min(100, score)), confidence: Math.max(0, Math.min(100, confidence <= 1 ? confidence * 100 : confidence)),
     intent: String(dialog.intent || ""), goal: String(dialog.goal || ""),
     objections: Array.isArray(dialog.objections) ? dialog.objections.map(String) : [],
@@ -221,7 +228,7 @@ export async function analyzeDialogsWithAi(dialogs: DialogForAi[], sessionApiKey
         "Подмечай скрытые сомнения, слабые ответы, отсутствие инициативы, пропущенные вопросы и момент потери клиента.",
         "Не выдумывай факты. Если переписка неоднозначна — снижай confidence. Ответы должны быть краткими и прикладными.",
         "Персональные данные уже заменены маркерами. Не пытайся их восстановить.",
-        "Для каждого входного peerId верни ровно один объект со всеми полями: peerId, intent, goal, goalReached, status, objections, score, issue, nuance, recommendation, betterReply, confidence.",
+        "Для каждого входного peerId верни ровно один объект со всеми полями: peerId, intent, goal, goalReached, status, objections, score, issue, nuance, recommendation, betterReply, confidence. Значение status должно быть строго одним из: Успешно, Риск, Потерян, Не лид. Подробности статуса пиши в issue, а не в status.",
       ].join(" "), 60_000);
         const parsedDialogs = dialogsFromParsed(result.parsed);
         const requestedIds = new Set(remaining.map((dialog) => dialog.peerId));

@@ -33,6 +33,17 @@ test("приводит уверенность модели из доли к пр
   assert.equal(fractional.dialogs[0].confidence, 85);
 });
 
+test("принимает свободный статус модели и не считает неподтверждённую запись успехом", async () => {
+  globalThis.fetch = async () => new Response(JSON.stringify({ choices: [{ message: { content: JSON.stringify({ dialogs: [
+    { ...result(1), status: "Потерян/завис — клиент не ответил" },
+    { ...result(2), status: "Интерес сохранён, запись не подтверждена" },
+    { ...result(3), status: "Успешно", goalReached: true },
+  ] }) } }] }), { status: 200 });
+  const analysis = await analyzeDialogsWithAi(dialogs, "test-key");
+  assert.equal(analysis.analyzedCount, 3);
+  assert.deepEqual(analysis.dialogs.map((dialog) => dialog.status), ["Потерян", "Риск", "Успешно"]);
+});
+
 test("не выдаёт резервный алгоритм за результат нейросети", async () => {
   globalThis.fetch = async () => new Response(JSON.stringify({ error: { message: "upstream unavailable" } }), { status: 503 });
   const analysis = await analyzeDialogsWithAi(dialogs, "test-key");

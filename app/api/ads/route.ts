@@ -1,4 +1,5 @@
 import { createClient } from "@supabase/supabase-js";
+import { publicSupabaseConfig } from "../../lib/supabaseConfig";
 
 type AdStat = { adId: string; dialogs: number; leads: number; targets: number; purchases?: number; phones?: number; lost: number; scoreSum: number; matched?: boolean; lookupUnavailable?: boolean; lookupReason?: string; matchType?: "banner" | "group" | "campaign"; adName?: string; groupId?: string; groupName?: string; campaignId?: string; campaignName?: string };
 type AnalysisDialog = { adId?: string | null; purchase?: boolean; goalReached?: boolean; goal?: string; issue?: string; metrics?: { hasPhone?: boolean } };
@@ -85,10 +86,9 @@ async function enrichWithVkAds(ads: AdStat[], communityId: string) {
 
 export async function GET(request: Request) {
   const token = request.headers.get("authorization")?.replace(/^Bearer\s+/i, "").trim();
-  const url = process.env.NEXT_PUBLIC_SUPABASE_URL;
-  const key = process.env.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY;
+  const { url, publishableKey: key } = publicSupabaseConfig();
   const communityId = new URL(request.url).searchParams.get("communityId");
-  if (!token || !url || !key || !communityId) return Response.json({ error: "Требуется вход" }, { status: 401 });
+  if (!token || !communityId) return Response.json({ error: "Требуется вход" }, { status: 401 });
   const client = createClient(url, key, {
     global: { headers: { Authorization: `Bearer ${token}` } },
     auth: { persistSession: false, autoRefreshToken: false },

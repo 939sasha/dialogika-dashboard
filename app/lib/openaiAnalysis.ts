@@ -197,7 +197,7 @@ export async function analyzeDialogsWithAi(dialogs: DialogForAi[], sessionApiKey
   let usage: Usage = { inputTokens: 0, outputTokens: 0, totalTokens: 0, estimatedCostUsd: 0 };
   let fallbackCount = 0;
   let failureReason = "";
-  const diagnostics: Array<{ model: string; returned: number; accepted: number; finishReason?: string; error?: string; shape?: Record<string, string>; idMatch?: boolean }> = [];
+  const diagnostics: Array<{ model: string; returned: number; accepted: number; finishReason?: string; error?: string; shape?: Record<string, string>; idMatch?: boolean; statuses?: string[] }> = [];
   const apiKey = sessionApiKey || process.env.OPENAI_API_KEY;
   if (!apiKey) throw new Error("На сервере сайта не настроен API-ключ Router Cheap");
   const models = preferredModel && MODEL_PRIORITY.includes(preferredModel)
@@ -234,7 +234,7 @@ export async function analyzeDialogsWithAi(dialogs: DialogForAi[], sessionApiKey
         const shape = sample && typeof sample === "object"
           ? Object.fromEntries(Object.entries(sample).map(([key, value]) => [key, Array.isArray(value) ? "array" : typeof value]))
           : undefined;
-        diagnostics.push({ model, returned: parsedDialogs.length, accepted, finishReason: result.finishReason, shape, idMatch: sample && typeof sample === "object" ? requestedIds.has(Number((sample as Record<string, unknown>).peerId)) : undefined });
+        diagnostics.push({ model, returned: parsedDialogs.length, accepted, finishReason: result.finishReason, shape, idMatch: sample && typeof sample === "object" ? requestedIds.has(Number((sample as Record<string, unknown>).peerId)) : undefined, statuses: parsedDialogs.map((item) => String(item.status || "").slice(0, 40)) });
         if (completed.size) usedModels.add(result.model);
         usage = {
           inputTokens: usage.inputTokens + result.usage.inputTokens,

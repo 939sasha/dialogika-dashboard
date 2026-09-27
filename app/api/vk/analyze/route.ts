@@ -233,7 +233,7 @@ function analyzeDialog(messages: VkMessage[]) {
   const hasPhone = PHONE_RE.test(clientText);
   const purchaseConfirmed = PURCHASE_SUCCESS_RE.test(text);
   const hasGoal = Object.values(GOALS).some((goal) => goal.success.test(text));
-  const hasInterest = INTEREST_RE.test(text) || inbound.length > 1;
+  const hasInterest = INTEREST_RE.test(clientText) || inbound.length > 1;
   const last = chronological.at(-1);
   const unanswered = Boolean(last && !last.out);
   const averageResponse = responseTimes.length
@@ -278,6 +278,7 @@ export async function POST(request: Request) {
       firstEverDate: number | null;
       transcript: string;
       adId: string | null;
+      hasClientMessage: boolean;
       revision: string;
       lastMessageId: number;
       lastMessageDate: number;
@@ -305,6 +306,7 @@ export async function POST(request: Request) {
         peerId,
         firstEverDate: history.firstEverDate,
         adId: history.adId,
+        hasClientMessage: history.messages.some((message) => !message.out),
         transcript: sanitizedTranscript(history.messages),
         revision,
         lastMessageId: lastMessage.id,
@@ -317,7 +319,7 @@ export async function POST(request: Request) {
 
     const senlerAds = await getSenlerAds(parseSenlerCredential(senlerCredential), attributedRows.map((row) => row.peerId));
     for (const row of attributedRows) if (!row.adId) row.adId = senlerAds.get(row.peerId) || null;
-    const rows = attributedRows.filter((row) => Boolean(row.adId));
+    const rows = attributedRows.filter((row) => Boolean(row.adId) && row.hasClientMessage);
 
     const aiResult = rows.length
       ? await analyzeDialogsWithAi(rows.map((row) => ({

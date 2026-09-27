@@ -5,7 +5,7 @@ import { createClient, SupabaseClient, User } from "@supabase/supabase-js";
 
 type Period = "30" | "60" | "90";
 type Community = { id: number; name: string; photo: string | null };
-type StoredAnalysis = { stats: LiveStats; dialogs: LiveDialog[]; period: Period; savedAt?: string; version?: 4 };
+type StoredAnalysis = { stats: LiveStats; dialogs: LiveDialog[]; period: Period; savedAt?: string; version?: 5 };
 type AnalysisCheckpoint = {
   version: 1; savedAt: number; offset: number; totalAvailable: number | null; dialogs: LiveDialog[];
   reusedPeerIds: number[]; changedPeerIds: number[]; scannedCount: number; preferredModel: string;
@@ -338,7 +338,7 @@ export default function Home() {
 
     const savedFromAccount = connections.find((item) => item.id === community.id)?.latestAnalysis;
     const previous = newerAnalysis(savedFromAccount, cachedAnalysis(community.id));
-    const reusable = previous && "stats" in previous && previous.version === 4 ? previous : null;
+    const reusable = previous && "stats" in previous && previous.version === 5 ? previous : null;
     const reusableDialogs = new Map<number, LiveDialog>();
     for (const dialog of reusable?.dialogs || []) {
       if (dialog.revision && dialog.metrics && dialog.adId) reusableDialogs.set(dialog.peerId, dialog);
@@ -633,7 +633,7 @@ export default function Home() {
         dialogs: analyzedDialogs,
         period,
         savedAt: new Date().toISOString(),
-        version: 4,
+        version: 5,
       };
       setConnections((current) => current.map((item) => item.id === community.id ? { ...item, latestAnalysis: storedAnalysis } : item));
       cacheAnalysis(community.id, storedAnalysis);

@@ -122,8 +122,8 @@ export async function GET(request: Request) {
       score: Number(dialog.score || 0),
       issue: dialog.issue || "",
       goal: dialog.goal || "",
-      purchase: purchaseOf(dialog),
-      phone: Boolean(dialog.metrics?.hasPhone),
+      purchase: dialog.purchase !== undefined || dialog.goalReached !== undefined ? purchaseOf(dialog) : null,
+      phone: dialog.metrics?.hasPhone !== undefined ? Boolean(dialog.metrics.hasPhone) : null,
       messages,
       messagesUnavailable,
     };

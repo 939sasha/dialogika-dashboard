@@ -9,8 +9,9 @@ type StoredAnalysis = { stats: LiveStats; dialogs: LiveDialog[]; period: Period;
 type SavedCommunity = Community & { token: string; latestAnalysis?: StoredAnalysis | LiveStats | null };
 type SavedSenlerConnection = { communityId: number; name: string; photo: string | null; key: string };
 type DialogMetrics = { hasPhone: boolean; hasInterest: boolean; responseSum: number; responseCount: number; slowResponse: boolean; noNextStep: boolean; unanswered: boolean; firstEverDate: number | null; objectionKeys: string[] };
-type LiveDialog = { peerId: number; adId?: string | null; score: number; status: string; issue: string; intent?: string; goal?: string; goalReached?: boolean; nuance?: string; recommendation?: string; betterReply?: string; confidence?: number; objections?: string[]; revision?: string; lastMessageId?: number; lastMessageDate?: number; metrics?: DialogMetrics; aiAnalyzed?: boolean; aiModel?: string };
-type AdStat = { adId: string; dialogs: number; leads: number; targets: number; lost: number; scoreSum: number; matched?: boolean; lookupUnavailable?: boolean; lookupReason?: string; matchType?: "banner" | "group" | "campaign"; adName?: string; groupId?: string; groupName?: string; campaignId?: string; campaignName?: string };
+type LiveDialog = { peerId: number; adId?: string | null; score: number; status: string; issue: string; intent?: string; goal?: string; goalReached?: boolean; purchase?: boolean; nuance?: string; recommendation?: string; betterReply?: string; confidence?: number; objections?: string[]; revision?: string; lastMessageId?: number; lastMessageDate?: number; metrics?: DialogMetrics; aiAnalyzed?: boolean; aiModel?: string };
+type AdStat = { adId: string; dialogs: number; leads: number; targets: number; purchases?: number; phones?: number; lost: number; scoreSum: number; matched?: boolean; lookupUnavailable?: boolean; lookupReason?: string; matchType?: "banner" | "group" | "campaign"; adName?: string; groupId?: string; groupName?: string; campaignId?: string; campaignName?: string };
+type AdDialogDetail = { peerId: number; status: string; score: number; issue: string; goal?: string; purchase: boolean; phone: boolean; messages: Array<{ role: "Клиент" | "Менеджер"; text: string; date: string }> };
 type LiveStats = {
   dialogs: number; leads: number; contacts: number; targets: number; lost: number;
   averageResponse: number; recoverableLow: number; recoverableHigh: number;
@@ -481,6 +482,7 @@ export default function Home() {
         const metrics = dialog.metrics as DialogMetrics;
         const lead = dialog.aiAnalyzed === false ? metrics.hasInterest : dialog.status !== "Не лид";
         const target = dialog.goalReached ?? dialog.status === "Успешно";
+        const purchase = dialog.purchase ?? (Boolean(target) && /(покуп|оплат|билет|приобр)/i.test(`${dialog.goal || ""} ${dialog.issue || ""}`));
         const lost = dialog.status === "Потерян";
 
         totals.leads += Number(lead);
@@ -502,10 +504,12 @@ export default function Home() {
         }
 
         if (dialog.adId) {
-          const current = adTotals[dialog.adId] || { adId: dialog.adId, dialogs: 0, leads: 0, targets: 0, lost: 0, scoreSum: 0 };
+          const current = adTotals[dialog.adId] || { adId: dialog.adId, dialogs: 0, leads: 0, targets: 0, purchases: 0, phones: 0, lost: 0, scoreSum: 0 };
           current.dialogs += 1;
           current.leads += Number(lead);
           current.targets += Number(target);
+          current.purchases = (current.purchases || 0) + Number(purchase);
+          current.phones = (current.phones || 0) + Number(metrics.hasPhone);
           current.lost += Number(lost);
           current.scoreSum += dialog.score || 0;
           adTotals[dialog.adId] = current;
@@ -739,7 +743,7 @@ export default function Home() {
           </>}
         </>}
 
-        {tab === "Объявления" && <AdsDashboard stats={liveStats} dialogs={liveDialogs} serverAds={serverAds} serverDialogTotal={serverAdDialogTotal} serverStatus={serverAdsStatus} serverError={serverAdsError} cabinet={adCabinet} onAnalyze={runAnalysis} />}
+        {tab === "Объявления" && <AdsDashboard stats={liveStats} dialogs={liveDialogs} serverAds={serverAds} serverDialogTotal={serverAdDialogTotal} serverStatus={serverAdsStatus} serverError={serverAdsError} cabinet={adCabinet} accessToken={accessToken} communityId={community?.id || null} onAnalyze={runAnalysis} />}
         {tab === "Диалоги" && <DialogsTable query={query} setQuery={setQuery} filteredDialogs={filteredDialogs} analyzed={Boolean(liveStats)} />}
         {tab === "Качество" && <Quality stats={liveStats} />}
         {tab === "ИИ-бот" && <Bot goal={liveStats?.goal} />}
@@ -923,64 +927,85 @@ function DialogsTable({ query, setQuery, filteredDialogs, analyzed }: { query: s
   </div>;
 }
 
-function AdsDashboard({ stats, dialogs, serverAds, serverDialogTotal, serverStatus, serverError, cabinet, onAnalyze }: { stats: LiveStats | null; dialogs: LiveDialog[]; serverAds: AdStat[]; serverDialogTotal: number; serverStatus: "idle" | "loading" | "ready" | "error"; serverError: string; cabinet: { connected: boolean; accountId: string | null } | null; onAnalyze: () => void }) {
+function AdsDashboard({ stats, dialogs, serverAds, serverDialogTotal, serverStatus, serverError, cabinet, accessToken, communityId, onAnalyze }: { stats: LiveStats | null; dialogs: LiveDialog[]; serverAds: AdStat[]; serverDialogTotal: number; serverStatus: "idle" | "loading" | "ready" | "error"; serverError: string; cabinet: { connected: boolean; accountId: string | null } | null; accessToken: string; communityId: number | null; onAnalyze: () => void }) {
+  const [selectedAdId, setSelectedAdId] = useState<string | null>(null);
+  const [detailStatus, setDetailStatus] = useState<"idle" | "loading" | "ready" | "error">("idle");
+  const [detailError, setDetailError] = useState("");
+  const [detailTotal, setDetailTotal] = useState(0);
+  const [detailDialogs, setDetailDialogs] = useState<AdDialogDetail[]>([]);
+
+  const purchaseOf = (dialog: LiveDialog) => dialog.purchase ?? (Boolean(dialog.goalReached ?? dialog.status === "Успешно") && /(покуп|оплат|билет|приобр)/i.test(`${dialog.goal || ""} ${dialog.issue || ""}`));
   const derivedAds = dialogs.reduce<Record<string, AdStat>>((result, dialog) => {
     if (!dialog.adId) return result;
-    const current = result[dialog.adId] || { adId: dialog.adId, dialogs: 0, leads: 0, targets: 0, lost: 0, scoreSum: 0 };
+    const current = result[dialog.adId] || { adId: dialog.adId, dialogs: 0, leads: 0, targets: 0, purchases: 0, phones: 0, lost: 0, scoreSum: 0 };
     current.dialogs += 1;
     current.leads += Number(dialog.status !== "Не лид");
-    current.targets += Number(dialog.status === "Успешно");
+    current.targets += Number(dialog.goalReached ?? dialog.status === "Успешно");
+    current.purchases = (current.purchases || 0) + Number(purchaseOf(dialog));
+    current.phones = (current.phones || 0) + Number(Boolean(dialog.metrics?.hasPhone));
     current.lost += Number(dialog.status === "Потерян");
     current.scoreSum += dialog.score || 0;
     result[dialog.adId] = current;
     return result;
   }, {});
-  const ads = serverStatus === "ready" ? serverAds : Array.isArray(stats?.ads) && stats.ads.length ? stats.ads : Object.values(derivedAds).sort((a, b) => b.dialogs - a.dialogs);
+  const ads = serverStatus === "ready" ? serverAds : Array.isArray(stats?.ads) && stats.ads.length ? stats.ads : Object.values(derivedAds).sort((a,b)=>b.dialogs-a.dialogs);
+  const selectedAd = selectedAdId ? ads.find((ad)=>ad.adId===selectedAdId) : null;
+
+  function sourceTitle(ad: AdStat) {
+    if (!ad.matched) return `Метка ${ad.adId}`;
+    if (ad.matchType === "campaign") return `Кампания «${ad.campaignName || ad.adId}»`;
+    if (ad.matchType === "group") return `Группа «${ad.groupName || ad.adId}»`;
+    return ad.adName || `Объявление #${ad.adId}`;
+  }
+
+  async function openAdDialogs(adId: string) {
+    if (!communityId || !accessToken) return;
+    setSelectedAdId(adId); setDetailStatus("loading"); setDetailError(""); setDetailDialogs([]);
+    try {
+      const response = await fetch(`/api/ads/dialogs?communityId=${communityId}&adId=${encodeURIComponent(adId)}`, { headers: { authorization: `Bearer ${accessToken}` } });
+      const result = await response.json() as { dialogs?: AdDialogDetail[]; total?: number; error?: string };
+      if (!response.ok) throw new Error(result.error || "Не удалось загрузить примеры диалогов");
+      setDetailDialogs(result.dialogs || []); setDetailTotal(result.total || 0); setDetailStatus("ready");
+    } catch (error) {
+      setDetailError(error instanceof Error ? error.message : "Не удалось загрузить примеры диалогов"); setDetailStatus("error");
+    }
+  }
+
+  const panel = selectedAdId && <div className="adDialogOverlay" onMouseDown={(e)=>{ if(e.currentTarget===e.target) setSelectedAdId(null); }}>
+    <aside className="adDialogPanel">
+      <div className="adDialogPanelHead"><div><span>ПРОВЕРКА КЛАССИФИКАЦИИ</span><h3>{selectedAd ? sourceTitle(selectedAd) : selectedAdId}</h3><p>Последние сообщения из связанных переписок. Контактные данные обезличены.</p></div><button onClick={()=>setSelectedAdId(null)}>×</button></div>
+      {detailStatus==="loading" && <div className="adDialogLoading">Загружаю фрагменты переписок из VK…</div>}
+      {detailStatus==="error" && <div className="adDialogLoading error">{detailError}</div>}
+      {detailStatus==="ready" && !detailDialogs.length && <div className="adDialogLoading">Связанные диалоги не найдены.</div>}
+      {detailStatus==="ready" && detailDialogs.length>0 && <><div className="adDialogCount">Показано {detailDialogs.length} из {detailTotal} связанных диалогов</div><div className="adDialogList">{detailDialogs.map((d)=><article className="adDialogCard" key={d.peerId}>
+        <div className="adDialogMeta"><div><b>Диалог #{d.peerId}</b><small>{d.status} · качество {d.score}/100</small></div><div className="adDialogFlags"><span className={d.purchase?"yes":"no"}>Покупка: {d.purchase?"да":"нет"}</span><span className={d.phone?"yes":"no"}>Телефон: {d.phone?"да":"нет"}</span></div></div>
+        {(d.goal||d.issue)&&<div className="adDialogConclusion"><b>Классификация:</b> {[d.goal,d.issue].filter(Boolean).join(" · ")}</div>}
+        <div className="adMessageList">{d.messages.map((m,i)=><div className={m.role==="Менеджер"?"adMessage manager":"adMessage client"} key={i}><div><b>{m.role}</b><small>{m.date}</small></div><p>{m.text}</p></div>)}</div>
+      </article>)}</div></>}
+    </aside>
+  </div>;
+
   if (serverStatus === "loading" || serverStatus === "error" || serverStatus === "ready") return <div className="pageBlock adsPage">
-    <div className="introRow"><div><p className="eyebrow">АТРИБУЦИЯ VK РЕКЛАМЫ</p><h2>Какие источники привели обращения</h2><p>Метка берётся из переписки, затем сверяется с кабинетом «Эмалис». Метка может обозначать объявление, группу или кампанию.</p></div></div>
-    {serverStatus === "ready" && <div className="adDataState">{cabinet?.connected ? `Кабинет «Эмалис» подключён · ID ${cabinet.accountId}. Другие рекламные кабинеты к этому сервису пока не подключены.` : "Для выбранного сообщества рекламный кабинет VK Ads не подключён. Метки из переписок показаны без названий объявлений."}</div>}
-    {serverStatus === "loading" && <div className="adDataState">Загружаю статистику объявлений…</div>}
-    {serverStatus === "error" && <div className="adDataState error">Не удалось сверить источники: {serverError}. Сохранённые числа диалогов доступны ниже.</div>}
-    {serverStatus === "ready" && !ads.length && <div className="adDataState">В сохранённом отчёте нет рекламных источников.</div>}
-    {ads.length > 0 && serverStatus !== "loading" && <>
-      <div className="adDataState success">Загружено: {ads.length} рекламных меток · {ads.reduce((sum, ad) => sum + ad.dialogs, 0)} рекламных диалогов из {serverDialogTotal || stats?.dialogs || dialogs.length}</div>
-      {serverStatus === "ready" && <div className="adDataState">В кабинете подтверждено: {ads.filter((ad) => ad.matchType === "banner" || (ad.matched && !ad.matchType)).length} объявлений, {ads.filter((ad) => ad.matchType === "group").length} групп, {ads.filter((ad) => ad.matchType === "campaign").length} кампаний. Остальные значения остаются метками источника: точное объявление по ним определить нельзя.</div>}
-      <p className="adDefinitions">Диалоги — сколько переписок пришло с этой меткой. Интерес — человек спрашивал о посещении или покупке. Запись/покупка — подтверждённое действие в переписке. Потеряны — интерес без результата. Качество — оценка обработки диалога по шкале 0–100.</p>
-      <div className="simpleAdsTable">
-        <table><thead><tr><th>Источник / объявление VK</th><th>Диалоги</th><th>Интерес</th><th>Запись / покупка</th><th>Потеряны</th><th>Качество</th></tr></thead>
-        <tbody>{ads.map((ad) => { const quality = ad.dialogs ? Math.round(ad.scoreSum / ad.dialogs) : 0; return <tr key={ad.adId}><td className="adIdentity">{ad.matched ? <><b>{ad.matchType === "campaign" ? `Кампания «${ad.campaignName || ad.adId}»` : ad.matchType === "group" ? `Группа «${ad.groupName || ad.adId}»` : ad.adName || `Объявление #${ad.adId}`}</b><small>{ad.matchType === "campaign" ? `ID кампании: ${ad.adId} · Конкретное объявление неизвестно` : ad.matchType === "group" ? `ID группы: ${ad.adId} · Конкретное объявление неизвестно` : `ID объявления: ${ad.adId}`}{ad.groupName && ad.matchType !== "group" ? ` · Группа: ${ad.groupName}` : ""}{ad.campaignName && ad.matchType !== "campaign" ? ` · Кампания: ${ad.campaignName}` : ""}</small></> : <><b>Метка {ad.adId}</b><small>{serverStatus === "error" ? "Сверка с кабинетом сейчас недоступна" : ad.lookupUnavailable ? ad.lookupReason || "Кабинет VK Ads не ответил" : "ID не найден в подключённом кабинете «Эмалис». Это может быть REF/UTM или источник из другого кабинета."}</small></>}</td><td>{ad.dialogs}</td><td>{ad.leads} · {pct(ad.leads, ad.dialogs)}%</td><td>{ad.targets} · {pct(ad.targets, ad.dialogs)}%</td><td>{ad.lost} · {pct(ad.lost, ad.dialogs)}%</td><td><b>{quality}/100</b></td></tr>; })}</tbody></table>
-      </div>
+    <div className="introRow"><div><p className="eyebrow">АТРИБУЦИЯ VK РЕКЛАМЫ</p><h2>Какие источники привели обращения</h2><p>Нажмите на источник, чтобы открыть примеры диалогов и проверить классификацию.</p></div></div>
+    {serverStatus==="ready"&&<div className="adDataState">{cabinet?.connected?`Кабинет «Эмалис» подключён · ID ${cabinet.accountId}. Другие рекламные кабинеты к этому сервису пока не подключены.`:"Для выбранного сообщества рекламный кабинет VK Ads не подключён."}</div>}
+    {serverStatus==="loading"&&<div className="adDataState">Загружаю статистику объявлений…</div>}
+    {serverStatus==="error"&&<div className="adDataState error">Не удалось сверить источники: {serverError}. Сохранённые числа доступны ниже.</div>}
+    {ads.length>0&&serverStatus!=="loading"&&<>
+      <div className="adDataState success">Загружено: {ads.length} рекламных меток · {ads.reduce((s,a)=>s+a.dialogs,0)} рекламных диалогов из {serverDialogTotal||stats?.dialogs||dialogs.length}</div>
+      <p className="adDefinitions">Покупка — отдельно подтверждённая покупка/оплата. Телефон — клиент оставил номер в переписке. Нажмите на источник, чтобы увидеть фрагменты диалогов.</p>
+      <div className="simpleAdsTable"><table><thead><tr><th>Источник / объявление VK</th><th>Диалоги</th><th>Интерес</th><th>Запись / покупка</th><th>Покупка</th><th>Телефон</th><th>Потеряны</th><th>Качество</th></tr></thead><tbody>
+      {ads.map((ad)=>{const q=ad.dialogs?Math.round(ad.scoreSum/ad.dialogs):0;return <tr key={ad.adId}><td className="adIdentity"><button className="adIdentityButton" onClick={()=>openAdDialogs(ad.adId)}><b>{sourceTitle(ad)}</b><small>{ad.matched?(ad.matchType==="campaign"?`ID кампании: ${ad.adId}`:ad.matchType==="group"?`ID группы: ${ad.adId}`:`ID объявления: ${ad.adId}`):(ad.lookupUnavailable?ad.lookupReason||"Кабинет VK Ads не ответил":"ID не найден в подключённом кабинете «Эмалис».")}</small><em>Открыть диалоги →</em></button></td><td>{ad.dialogs}</td><td>{ad.leads} · {pct(ad.leads,ad.dialogs)}%</td><td>{ad.targets} · {pct(ad.targets,ad.dialogs)}%</td><td>{ad.purchases||0} · {pct(ad.purchases||0,ad.dialogs)}%</td><td>{ad.phones||0} · {pct(ad.phones||0,ad.dialogs)}%</td><td>{ad.lost} · {pct(ad.lost,ad.dialogs)}%</td><td><b>{q}/100</b></td></tr>})}
+      </tbody></table></div>
     </>}
+    {panel}
   </div>;
-  if (!stats && !ads.length) return <div className="pageBlock adsPage">
-    <div className="introRow"><div><p className="eyebrow">АТРИБУЦИЯ VK РЕКЛАМЫ</p><h2>Качество диалогов по объявлениям</h2><p>Так будет выглядеть отчёт после анализа. Источник определяется автоматически — без данных о расходах.</p></div><button className="primary" onClick={onAnalyze}>Запустить анализ →</button></div>
-    <div className="adPreviewNotice"><b>Нет отчёта</b><span>После анализа здесь появятся только найденные в переписках источники.</span></div>
-  </div>;
-  const adDialogs = ads.reduce((sum, ad) => sum + ad.dialogs, 0);
-  const adTargets = ads.reduce((sum, ad) => sum + ad.targets, 0);
-  const best = [...ads].filter((ad) => ad.dialogs >= 2).sort((a, b) => pct(b.targets, b.dialogs) - pct(a.targets, a.dialogs))[0];
-  const allDialogs = serverDialogTotal || stats?.dialogs || dialogs.length;
-  return <div className="pageBlock adsPage">
-    <div className="introRow"><div><p className="eyebrow">АТРИБУЦИЯ VK РЕКЛАМЫ</p><h2>Качество диалогов по объявлениям</h2><p>Источник определяется автоматически по данным первого сообщения. Расходы рекламного кабинета не используются.</p></div></div>
-    <div className="adSummary">
-      <Metric label="Источников найдено" value={String(ads.length)} hint="разных меток" description="Количество различных источников, переданных VK или Senler. Метка не всегда является ID конкретного объявления." />
-      <Metric label="Диалогов с меткой" value={adDialogs.toLocaleString("ru-RU")} hint={`${pct(adDialogs, allDialogs)}% от всех диалогов`} description="Переписки, для которых удалось получить рекламную или REF/UTM-метку." />
-      <Metric label="Записей и покупок" value={adTargets.toLocaleString("ru-RU")} hint={`${pct(adTargets, adDialogs)}% диалогов с меткой`} description="Диалоги с меткой, где в переписке найдена подтверждённая запись, покупка или оплата." />
-      <Metric label="Лучший источник" value={best ? `#${best.adId}` : "н/д"} hint={best ? `${pct(best.targets, best.dialogs)}% с результатом` : "нужно минимум 2 диалога"} description="Источник с наибольшей долей подтверждённых действий среди источников с двумя и более диалогами." />
-    </div>
-    {ads.length ? <div className="adsTable card">
-      <div className="adsHead"><span>Источник VK</span><span>Диалоги</span><span>Интерес</span><span>Запись / покупка</span><span>Потеряны</span><span>Качество</span></div>
-      {ads.map((ad) => {
-        const quality = ad.dialogs ? Math.round(ad.scoreSum / ad.dialogs) : 0;
-        return <div className="adsRow" key={ad.adId}>
-          <div><span className="adSource">Из VK Рекламы</span><b>#{ad.adId}</b></div><strong>{ad.dialogs}</strong>
-          <div><b>{ad.leads}</b><small>{pct(ad.leads, ad.dialogs)}%</small></div><div><b>{ad.targets}</b><small>{pct(ad.targets, ad.dialogs)}%</small></div>
-          <div className={ad.lost ? "adLost" : ""}><b>{ad.lost}</b><small>{pct(ad.lost, ad.dialogs)}%</small></div>
-          <div className="qualityCell"><b>{quality}/100</b><i><em style={{ width: `${quality}%` }} /></i></div>
-        </div>;
-      })}
-    </div> : <EmptyState title="Рекламные диалоги не найдены" text="В выбранном периоде VK не передал ни одного сообщения с источником vk_ads. Попробуйте период 60 или 90 дней." />}
-  </div>;
+
+  if (!stats && !ads.length) return <div className="pageBlock adsPage"><div className="introRow"><div><p className="eyebrow">АТРИБУЦИЯ VK РЕКЛАМЫ</p><h2>Качество диалогов по объявлениям</h2></div><button className="primary" onClick={onAnalyze}>Запустить анализ →</button></div></div>;
+
+  return <div className="pageBlock adsPage"><div className="introRow"><div><p className="eyebrow">АТРИБУЦИЯ VK РЕКЛАМЫ</p><h2>Качество диалогов по объявлениям</h2></div></div><div className="adsTable card">
+    <div className="adsHead"><span>Источник VK</span><span>Диалоги</span><span>Интерес</span><span>Покупка</span><span>Телефон</span><span>Потеряны</span><span>Качество</span></div>
+    {ads.map((ad)=>{const q=ad.dialogs?Math.round(ad.scoreSum/ad.dialogs):0;return <div className="adsRow" key={ad.adId}><button className="adSourceCell" onClick={()=>openAdDialogs(ad.adId)}><span className="adSource">Из VK Рекламы</span><b>#{ad.adId}</b><small>Открыть диалоги →</small></button><strong>{ad.dialogs}</strong><div><b>{ad.leads}</b><small>{pct(ad.leads,ad.dialogs)}%</small></div><div><b>{ad.purchases||0}</b><small>{pct(ad.purchases||0,ad.dialogs)}%</small></div><div><b>{ad.phones||0}</b><small>{pct(ad.phones||0,ad.dialogs)}%</small></div><div className={ad.lost?"adLost":""}><b>{ad.lost}</b><small>{pct(ad.lost,ad.dialogs)}%</small></div><div className="qualityCell"><b>{q}/100</b><i><em style={{width:`${q}%`}} /></i></div></div>})}
+  </div>{panel}</div>;
 }
 
 function Quality({ stats }: { stats: LiveStats | null }) {

@@ -372,7 +372,8 @@ export default function Home() {
       const fetchPage = async (pageOffset: number, model: string) => {
         let response: Response | null = null;
         let responseText = "";
-        for (let attempt = 0; attempt < 2; attempt += 1) {
+        const maxAttempts = 4;
+        for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
           try {
             response = await fetch("/api/vk/analyze", {
               method: "POST",
@@ -389,16 +390,16 @@ export default function Home() {
               }),
             });
             responseText = await response.text();
-            if (response.ok || response.status < 500 || response.status === 524 || attempt === 1) break;
+            if (response.ok || response.status < 500 || attempt === maxAttempts - 1) break;
           } catch (error) {
-            if (attempt === 1) {
+            if (attempt === maxAttempts - 1) {
               throw new Error(error instanceof Error && error.message === "Failed to fetch"
                 ? "Соединение с сервером анализа оборвалось. Запустите анализ ещё раз — предыдущий результат сохранён."
                 : error instanceof Error ? error.message : "Сервер анализа не ответил");
             }
           }
-          setNotice("Сервер задержал пачку. Повторная попытка " + (attempt + 2) + " из 2…");
-          await new Promise((resolve) => setTimeout(resolve, 1200 * (attempt + 1)));
+          setNotice("Сервер задержал пачку. Повторная попытка " + (attempt + 2) + " из " + maxAttempts + "…");
+          await new Promise((resolve) => setTimeout(resolve, 1500 * 2 ** attempt));
         }
         if (!response) throw new Error("Сервер анализа не ответил");
 
@@ -423,7 +424,7 @@ export default function Home() {
             ? "Сервер не успел обработать пачку диалогов. Повторите запуск — размер пачек уже уменьшен."
             : "Сервер вернул некорректный ответ" + (response.status ? " (" + response.status + ")" : "") + ".");
         }
-        if (!response.ok || !result.stats) throw new Error(result.error || "Анализ не завершён");
+        if (!response.ok || !result.stats) throw new Error(`Пачка ${pageOffset}: ${result.error || "анализ не завершён"}`);
         return result;
       };
 

@@ -5,7 +5,7 @@ import { createClient, SupabaseClient, User } from "@supabase/supabase-js";
 
 type Period = "30" | "60" | "90";
 type Community = { id: number; name: string; photo: string | null };
-type StoredAnalysis = { stats: LiveStats; dialogs: LiveDialog[]; period: Period; savedAt?: string; version?: 2 };
+type StoredAnalysis = { stats: LiveStats; dialogs: LiveDialog[]; period: Period; savedAt?: string; version?: 3 };
 type SavedCommunity = Community & { token: string; latestAnalysis?: StoredAnalysis | LiveStats | null };
 type SavedSenlerConnection = { communityId: number; name: string; photo: string | null; key: string };
 type DialogMetrics = { hasPhone: boolean; hasInterest: boolean; responseSum: number; responseCount: number; slowResponse: boolean; noNextStep: boolean; unanswered: boolean; firstEverDate: number | null; objectionKeys: string[] };
@@ -323,7 +323,7 @@ export default function Home() {
 
     const savedFromAccount = connections.find((item) => item.id === community.id)?.latestAnalysis;
     const previous = newerAnalysis(savedFromAccount, cachedAnalysis(community.id));
-    const reusable = previous && "stats" in previous && previous.version === 2 ? previous : null;
+    const reusable = previous && "stats" in previous && previous.version === 3 ? previous : null;
     const reusableDialogs = new Map<number, LiveDialog>();
     for (const dialog of reusable?.dialogs || []) {
       if (dialog.revision && dialog.metrics) reusableDialogs.set(dialog.peerId, dialog);
@@ -580,7 +580,7 @@ export default function Home() {
         dialogs: analyzedDialogs,
         period,
         savedAt: new Date().toISOString(),
-        version: 2,
+        version: 3,
       };
       setConnections((current) => current.map((item) => item.id === community.id ? { ...item, latestAnalysis: storedAnalysis } : item));
       cacheAnalysis(community.id, storedAnalysis);

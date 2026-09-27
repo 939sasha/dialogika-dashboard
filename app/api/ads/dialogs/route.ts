@@ -1,5 +1,6 @@
 import { createClient } from "@supabase/supabase-js";
 import { decryptCredential } from "../../../lib/credentials";
+import { publicSupabaseConfig } from "../../../lib/supabaseConfig";
 
 const VK_API = "https://api.vk.com/method";
 const VK_VERSION = "5.199";
@@ -53,12 +54,11 @@ function purchaseOf(dialog: StoredDialog) {
 
 export async function GET(request: Request) {
   const authToken = request.headers.get("authorization")?.replace(/^Bearer\s+/i, "").trim();
-  const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
-  const key = process.env.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY;
+  const { url: supabaseUrl, publishableKey: key } = publicSupabaseConfig();
   const requestUrl = new URL(request.url);
   const communityId = requestUrl.searchParams.get("communityId");
   const adId = requestUrl.searchParams.get("adId");
-  if (!authToken || !supabaseUrl || !key || !communityId || !adId) {
+  if (!authToken || !communityId || !adId) {
     return Response.json({ error: "Требуется вход" }, { status: 401 });
   }
 

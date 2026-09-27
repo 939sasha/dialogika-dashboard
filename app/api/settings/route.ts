@@ -23,6 +23,14 @@ async function authorizedClient(request: Request) {
   return user ? { client, user } : null;
 }
 
+async function decryptBestEffort(ciphertext: string) {
+  try {
+    return { value: await decryptCredential(ciphertext), available: true };
+  } catch {
+    return { value: "", available: false };
+  }
+}
+
 export async function GET(request: Request) {
   const auth = await authorizedClient(request);
   if (!auth) return Response.json({ error: "Требуется вход" }, { status: 401 });
@@ -30,21 +38,36 @@ export async function GET(request: Request) {
     .select("kind,external_id,name,photo,credential_ciphertext,latest_analysis")
     .eq("user_id", auth.user.id).order("updated_at", { ascending: false });
   if (error) return Response.json({ error: error.message }, { status: 500 });
-  try {
-    const rows = (data || []) as StoredRow[];
-    const communities = await Promise.all(rows.filter((row) => row.kind === "vk").map(async (row) => ({
+
+  const rows = (data || []) as StoredRow[];
+  const communities = await Promise.all(rows.filter((row) => row.kind === "vk").map(async (row) => {
+    const credential = await decryptBestEffort(row.credential_ciphertext);
+    return {
       id: Number(row.external_id), name: row.name, photo: row.photo,
-      token: await decryptCredential(row.credential_ciphertext), latestAnalysis: row.latest_analysis,
-    })));
-    const router = rows.find((row) => row.kind === "router");
-    const senlerConnections = await Promise.all(rows.filter((row) => row.kind === "senler").map(async (row) => ({
+      token: credential.value, credentialAvailable: credential.available, latestAnalysis: row.latest_analysis,
+    };
+  }));
+  const router = rows.find((row) => row.kind === "router");
+  const routerCredential = router ? await decryptBestEffort(router.credential_ciphertext) : { value: "", available: false };
+  const senlerConnections = await Promise.all(rows.filter((row) => row.kind === "senler").map(async (row) => {
+    const credential = await decryptBestEffort(row.credential_ciphertext);
+    return {
       communityId: Number(row.external_id), name: row.name, photo: row.photo,
-      key: await decryptCredential(row.credential_ciphertext),
-    })));
-    return Response.json({ communities, routerKey: router ? await decryptCredential(router.credential_ciphertext) : "", senlerConnections });
-  } catch {
-    return Response.json({ error: "Не удалось расшифровать сохранённые подключения" }, { status: 500 });
-  }
+      key: credential.value, credentialAvailable: credential.available,
+    };
+  }));
+  const credentialRecoveryNeeded =
+    communities.some((item) => !item.credentialAvailable) ||
+    Boolean(router && !routerCredential.available) ||
+    senlerConnections.some((item) => !item.credentialAvailable);
+
+  return Response.json({
+    communities,
+    routerKey: routerCredential.value,
+    routerCredentialAvailable: router ? routerCredential.available : false,
+    senlerConnections,
+    credentialRecoveryNeeded,
+  });
 }
 
 export async function PUT(request: Request) {

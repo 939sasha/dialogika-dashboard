@@ -12,6 +12,7 @@ export async function dashboardAccounts(client: SupabaseClient, userId: string) 
       const { data: entities, error: entityError } = await client.from("ad_entities")
         .select("project_id").in("project_id", projects.map((item) => item.id))
         .eq("platform", "vk").in("entity_type", ["ad", "ad_group"])
+        .order("project_id").order("id")
         .range(offset, offset + 999);
       if (entityError) throw entityError;
       for (const item of entities || []) detailed.add(item.project_id);
@@ -23,6 +24,7 @@ export async function dashboardAccounts(client: SupabaseClient, userId: string) 
     for (let offset = 0; offset < 5000; offset += 1000) {
       const { data: campaigns, error: campaignError } = await client.from("campaigns")
         .select("project_id").in("project_id", projects.map((item) => item.id))
+        .order("project_id").order("id")
         .range(offset, offset + 999);
       if (campaignError) throw campaignError;
       for (const item of campaigns || []) available.add(item.project_id);

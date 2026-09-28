@@ -1127,7 +1127,7 @@ function AdsDashboard({ stats, dialogs, serverAds, serverDialogTotal, serverStat
 
   const selectedDialog = expandedPeerId === null ? null : detailDialogs.find((dialog) => dialog.peerId === expandedPeerId) || null;
   const visibleMessages = selectedDialog && expandedStatus === "ready" && expandedMessages.length ? expandedMessages : selectedDialog?.messages || [];
-  const messageList = (messages: EvidenceMessage[]) => <div className="adMessageList">{messages.map((message, index) => <div className={message.role === "Менеджер" ? "adMessage manager" : "adMessage client"} key={index}><div><b>{message.role}</b><small>{message.date}</small></div><p>{message.text}</p></div>)}</div>;
+  const messageList = (messages: EvidenceMessage[]) => <div className="conversationMessages">{messages.map((message, index) => <div className={message.role === "Менеджер" ? "conversationMessage manager" : "conversationMessage client"} key={index}><div><b>{message.role}</b><small>{message.date}</small></div><p>{message.text}</p></div>)}</div>;
   const panel = selectedAdId && <div className="adDialogOverlay" onMouseDown={(e)=>{ if(e.currentTarget===e.target) setSelectedAdId(null); }}>
     <aside className="adDialogPanel" ref={panelRef}>
       <div className="adDialogPanelHead"><div><span>ПРОВЕРКА КЛАССИФИКАЦИИ</span><h3>{selectedAd ? sourceTitle(selectedAd) : selectedAdId}</h3><p>Откройте переписку, чтобы проверить вывод по сообщениям. Телефоны и ссылки скрыты.</p></div><button onClick={()=>setSelectedAdId(null)}>×</button></div>
@@ -1137,12 +1137,12 @@ function AdsDashboard({ stats, dialogs, serverAds, serverDialogTotal, serverStat
         <p>{selectedDialog.status} · качество {selectedDialog.score}/100 · покупка: {selectedDialog.purchase ? "да" : "нет"} · телефон: {selectedDialog.phone ? "да" : "нет"}</p>
         <div className="adDialogConclusion">
           <b>Классификация:</b> {[selectedDialog.goal, selectedDialog.issue].filter(Boolean).join(" · ") || "Не определена"}
-          <div className="adTranscript">
+          <div className="conversationTranscript">
             <strong>Переписка · {visibleMessages.length} сообщений</strong>
             {expandedStatus === "loading" && <p>Загружаю полную историю из VK; сохранённые сообщения уже показаны.</p>}
             {expandedStatus === "error" && <p>{expandedError} Показаны сохранённые сообщения.</p>}
             {expandedStatus === "ready" && expandedTruncated && <p>Показаны последние 1000 сообщений. Более ранние сообщения не загружены.</p>}
-            {visibleMessages.length ? visibleMessages.map((message, index) => <div className="adTranscriptMessage" key={index}><b>{message.role} · {message.date}</b><p>{message.text}</p></div>) : <p>В VK и сохранённом отчёте нет доступных сообщений этой переписки.</p>}
+            {visibleMessages.length ? visibleMessages.map((message, index) => <div className="conversationEntry" key={index}><b>{message.role} · {message.date}</b><p>{message.text}</p></div>) : <p>В VK и сохранённом отчёте нет доступных сообщений этой переписки.</p>}
           </div>
         </div>
       </div> : <>

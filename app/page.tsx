@@ -5,8 +5,8 @@ import { createClient, SupabaseClient, User } from "@supabase/supabase-js";
 
 type Period = "30" | "60" | "90";
 type Community = { id: number; name: string; photo: string | null };
-type StoredAnalysis = { stats: LiveStats; dialogs: LiveDialog[]; period: Period; accountId?: string; savedAt?: string; version?: 5 | 6 | 7 | 8 | 9 | 10 | 11 };
-type SenlerAttribution = { totalSubscriptions: number; withAdMarker: number; outsideAccount: number; withSenlerTagNoAdId: number; withoutMarker: number; accountAdSubscriptions: number; linkedToDialog: number };
+type StoredAnalysis = { stats: LiveStats; dialogs: LiveDialog[]; period: Period; accountId?: string; savedAt?: string; version?: 5 | 6 | 7 | 8 | 9 | 10 | 11 | 12 };
+type SenlerAttribution = { totalSubscriptions: number; withAdMarker: number; outsideAccount: number; withSenlerTagNoAdId: number; withoutMarker: number; accountAdSubscriptions: number; linkedToDialog: number; vkResultsTotal?: number; vkResultsError?: string | null };
 type SenlerEvent = { peerId: number | null; adId: string; date: string };
 type Attribution = { recentConversations: number; historiesLoaded: number; withVkMarker: number; withSenlerMarker: number; matchedToAccount: number; taggedOutsideAccount: number; withoutMarker: number };
 const emptyAttribution = (): Attribution => ({ recentConversations: 0, historiesLoaded: 0, withVkMarker: 0, withSenlerMarker: 0, matchedToAccount: 0, taggedOutsideAccount: 0, withoutMarker: 0 });
@@ -24,7 +24,7 @@ type AdCabinet = { connected: boolean; accountId: string | null; source?: "api" 
 type DialogMetrics = { hasPhone: boolean; hasInterest: boolean; responseSum: number; responseCount: number; slowResponse: boolean; noNextStep: boolean; unanswered: boolean; firstEverDate: number | null; objectionKeys: string[] };
 type EvidenceMessage = { role: "Клиент" | "Менеджер"; text: string; date: string };
 type LiveDialog = { peerId: number; adId?: string | null; hasClientMessage?: boolean; score: number; status: string; issue: string; intent?: string; goal?: string; goalReached?: boolean; purchase?: boolean; nuance?: string; recommendation?: string; betterReply?: string; confidence?: number; objections?: string[]; revision?: string; lastMessageId?: number; lastMessageDate?: number; metrics?: DialogMetrics; aiAnalyzed?: boolean; aiModel?: string; evidence?: EvidenceMessage[] };
-type AdStat = { adId: string; dialogs: number; subscriptions?: number; replies?: number; leads: number; targets: number; purchases?: number | null; phones?: number | null; lost: number; scoreSum: number; matched?: boolean; lookupUnavailable?: boolean; lookupReason?: string; matchType?: "banner" | "group" | "campaign"; adName?: string; groupId?: string; groupName?: string; campaignId?: string; campaignName?: string };
+type AdStat = { adId: string; dialogs: number; subscriptions?: number; vkResults?: number; replies?: number; leads: number; targets: number; purchases?: number | null; phones?: number | null; lost: number; scoreSum: number; matched?: boolean; lookupUnavailable?: boolean; lookupReason?: string; matchType?: "banner" | "group" | "campaign"; adName?: string; groupId?: string; groupName?: string; campaignId?: string; campaignName?: string };
 type AdDialogDetail = { peerId: number; status: string; score: number; issue: string; goal?: string; purchase: boolean | null; phone: boolean | null; messages: EvidenceMessage[]; messagesUnavailable?: boolean };
 type LiveStats = {
   dialogs: number; replies?: number; leads: number; contacts: number; targets: number; lost: number;
@@ -460,7 +460,7 @@ export default function Home() {
     // Scan each recent VK conversation so the attribution audit has complete denominators.
     const knownRevisions = {};
     const incremental = false;
-    const checkpointKey = `dialogika-analysis-checkpoint-v4:${user?.id || ""}:${community.id}:${period}`;
+    const checkpointKey = `dialogika-analysis-checkpoint-v5:${user?.id || ""}:${community.id}:${period}`;
     let checkpoint: AnalysisCheckpoint | null = null;
     try {
       const saved = sessionStorage.getItem(checkpointKey);
@@ -483,18 +483,21 @@ export default function Home() {
     try {
       let senler: SenlerAttribution | undefined;
       let senlerEvents: SenlerEvent[] = [];
+      let vkResults: Array<{ adId: string; results: number }> = [];
       if (dashboardSenlerConnected) {
         setNotice("Сверяю подписки Senler с ID объявлений выбранного кабинета…");
         const response = await fetch("/api/senler/attribution", {
           method: "POST", headers: { authorization: `Bearer ${accessToken}`, "content-type": "application/json" },
           body: JSON.stringify({ communityId: String(community.id), days: Number(period) }),
         });
-        const result = await response.json() as Partial<SenlerAttribution> & { events?: SenlerEvent[]; error?: string };
+        const result = await response.json() as Partial<SenlerAttribution> & { events?: SenlerEvent[]; vkResults?: Array<{ adId: string; results: number }>; vkResultsError?: string | null; error?: string };
         if (!response.ok || !Array.isArray(result.events)) throw new Error(result.error || "Подписки Senler не удалось проверить. Предыдущий отчёт сохранён.");
         senlerEvents = result.events.filter((event) => verifiedAdIds?.has(event.adId));
+        vkResults = (result.vkResults || []).filter((row) => verifiedAdIds?.has(row.adId) && Number.isFinite(row.results));
         senler = { totalSubscriptions: result.totalSubscriptions || 0, withAdMarker: result.withAdMarker || 0,
           outsideAccount: result.outsideAccount || 0, withSenlerTagNoAdId: result.withSenlerTagNoAdId || 0,
-          withoutMarker: result.withoutMarker || 0, accountAdSubscriptions: result.accountAdSubscriptions || 0, linkedToDialog: 0 };
+          withoutMarker: result.withoutMarker || 0, accountAdSubscriptions: result.accountAdSubscriptions || 0, linkedToDialog: 0,
+          vkResultsTotal: vkResults.reduce((sum, row) => sum + row.results, 0), vkResultsError: result.vkResultsError || null };
         if (senlerEvents.length !== senler.accountAdSubscriptions) throw new Error("Сверка подписок и ID объявлений не сошлась. Предыдущий отчёт сохранён.");
       }
       const senlerAdByPeer: Record<string, string> = {};
@@ -717,6 +720,11 @@ export default function Home() {
           current.subscriptions = (current.subscriptions || 0) + 1;
           adTotals[event.adId] = current;
         }
+        for (const row of vkResults) {
+          const current = adTotals[row.adId] || { adId: row.adId, dialogs: 0, replies: 0, leads: 0, targets: 0, purchases: 0, phones: 0, lost: 0, scoreSum: 0 };
+          current.vkResults = row.results;
+          adTotals[row.adId] = current;
+        }
       }
 
       const recoverableLow = Math.round(totals.lost * 0.25);
@@ -787,7 +795,7 @@ export default function Home() {
         period,
         accountId: adAssignments[String(community.id)] || undefined,
         savedAt: new Date().toISOString(),
-        version: 11,
+        version: 12,
       };
       setConnections((current) => current.map((item) => item.id === community.id ? { ...item, latestAnalysis: storedAnalysis } : item));
       cacheAnalysis(community.id, storedAnalysis);
@@ -904,7 +912,7 @@ export default function Home() {
               <b>Подписки и переписки — разные события</b>
               <p>В выбранном кабинете {sourceProfile.miniAppAds} объявлений ведут в VK Mini App. Результат «Подписаться на рассылку» может появиться без сообщения в сообщество, поэтому число подписок нельзя считать числом переписок.</p>
               {!sourceProfile.senlerConnected && !sourceProfile.dashboardSenlerConnected && <p>Senler для этого сообщества не подключён. Подписки без сообщений сейчас нельзя сверить по людям и объявлениям. <button onClick={() => setTab("Настройки")}>Подключить Senler →</button></p>}
-              {liveStats?.senler && <p>Senler: {liveStats.senler.totalSubscriptions} событий подписки; у {liveStats.senler.accountAdSubscriptions} есть точный ID объявления выбранного кабинета. Из них {liveStats.senler.linkedToDialog} связаны с перепиской. Ещё {liveStats.senler.withSenlerTagNoAdId} имеют метку Senler без точного ID объявления, {liveStats.senler.outsideAccount} относятся к другому кабинету или отсутствуют в выбранном. Подписка без сообщений не считается диалогом и не оценивается ИИ.</p>}
+              {liveStats?.senler && <p>Senler: {liveStats.senler.totalSubscriptions} событий подписки; у {liveStats.senler.accountAdSubscriptions} есть точный ID объявления выбранного кабинета. Из них {liveStats.senler.linkedToDialog} связаны с перепиской. Без метки источника — {liveStats.senler.withoutMarker}, с меткой Senler без ID объявления — {liveStats.senler.withSenlerTagNoAdId}, с ID другого кабинета — {liveStats.senler.outsideAccount}. {liveStats.senler.vkResultsError ? `Статистика результатов VK Ads недоступна: ${liveStats.senler.vkResultsError}.` : `VK Ads показывает ${liveStats.senler.vkResultsTotal || 0} результатов объявлений Mini App; они приведены отдельно и могут не совпадать с событиями Senler.`} Подписка без сообщений не считается диалогом и не оценивается ИИ.</p>}
             </article> : null}
             {liveStats.attribution && <article className="card attributionCard">
               <b>Сверка рекламных меток за {period} дней</b>
@@ -1292,10 +1300,10 @@ function AdsDashboard({ stats, dialogs, serverAds, serverDialogTotal, serverStat
     {serverStatus==="loading"&&<div className="adDataState">Загружаю статистику объявлений…</div>}
     {serverStatus==="error"&&<div className="adDataState error">Не удалось сверить источники: {serverError}. Сохранённые числа доступны ниже.</div>}
     {ads.length>0&&serverStatus!=="loading"&&<>
-      <div className="adDataState success">Загружено: {ads.length} рекламных источников · {ads.reduce((s,a)=>s+a.dialogs,0)} переписок с меткой · {ads.reduce((s,a)=>s+(a.replies ?? a.dialogs),0)} с ответом клиента · {ads.reduce((s,a)=>s+(a.subscriptions || 0),0)} подписок Senler с точным ID объявления</div>
+      <div className="adDataState success">Загружено: {ads.length} рекламных источников · {ads.reduce((s,a)=>s+a.dialogs,0)} переписок с меткой · {ads.reduce((s,a)=>s+(a.replies ?? a.dialogs),0)} с ответом клиента · {ads.reduce((s,a)=>s+(a.subscriptions || 0),0)} подписок Senler с точным ID объявления · {ads.reduce((s,a)=>s+(a.vkResults || 0),0)} результатов VK Ads Mini App</div>
       <p className="adDefinitions">Все переписки с рекламной меткой включены. «Ответ клиента» отделяет реальные обращения от рассылок без отклика; ИИ оценивает содержание только после ответа. Покупка и телефон подтверждаются перепиской. Качество рассчитано по перепискам с ответом клиента.</p>
-      <div className="simpleAdsTable"><table><thead><tr><th>Источник / объявление VK</th><th>С меткой</th><th>Подписки Senler</th><th>Ответ клиента</th><th>Интерес</th><th>Запись / покупка</th><th>Покупка</th><th>Телефон</th><th>Потеряны</th><th>Качество</th></tr></thead><tbody>
-      {ads.map((ad)=>{const replied=ad.replies ?? ad.dialogs;const q=replied?Math.round(ad.scoreSum/replied):0;return <tr key={ad.adId}><td className="adIdentity"><button className="adIdentityButton" onClick={()=>openAdDialogs(ad.adId)}><b>{sourceTitle(ad)}</b><small>{ad.matched?(ad.matchType==="campaign"?`ID кампании: ${ad.adId}`:ad.matchType==="group"?`ID группы: ${ad.adId}`:`ID объявления: ${ad.adId}${ad.groupId?` · группа ${ad.groupName || ad.groupId}`:""}${ad.campaignId?` · кампания ${ad.campaignName || ad.campaignId}`:""}`):(ad.lookupUnavailable?ad.lookupReason||"Кабинет VK Ads не ответил":"ID не найден в выбранном кабинете VK Ads.")}</small><em>{ad.dialogs ? "Открыть диалоги →" : "Переписок пока нет"}</em></button></td><td>{ad.dialogs}</td><td>{ad.subscriptions || 0}</td><td>{replied} · {pct(replied,ad.dialogs)}%</td><td>{ad.leads} · {pct(ad.leads,replied)}%</td><td>{ad.targets} · {pct(ad.targets,replied)}%</td><td>{ad.purchases == null ? "—" : `${ad.purchases} · ${pct(ad.purchases,replied)}%`}</td><td>{ad.phones == null ? "—" : `${ad.phones} · ${pct(ad.phones,replied)}%`}</td><td>{ad.lost} · {pct(ad.lost,replied)}%</td><td>{replied?<b>{q}/100</b>:"—"}</td></tr>})}
+      <div className="simpleAdsTable"><table><thead><tr><th>Источник / объявление VK</th><th>С меткой</th><th>Подписки Senler</th><th>Результаты VK Ads</th><th>Ответ клиента</th><th>Интерес</th><th>Запись / покупка</th><th>Покупка</th><th>Телефон</th><th>Потеряны</th><th>Качество</th></tr></thead><tbody>
+      {ads.map((ad)=>{const replied=ad.replies ?? ad.dialogs;const q=replied?Math.round(ad.scoreSum/replied):0;return <tr key={ad.adId}><td className="adIdentity"><button className="adIdentityButton" onClick={()=>openAdDialogs(ad.adId)}><b>{sourceTitle(ad)}</b><small>{ad.matched?(ad.matchType==="campaign"?`ID кампании: ${ad.adId}`:ad.matchType==="group"?`ID группы: ${ad.adId}`:`ID объявления: ${ad.adId}${ad.groupId?` · группа ${ad.groupName || ad.groupId}`:""}${ad.campaignId?` · кампания ${ad.campaignName || ad.campaignId}`:""}`):(ad.lookupUnavailable?ad.lookupReason||"Кабинет VK Ads не ответил":"ID не найден в выбранном кабинете VK Ads.")}</small><em>{ad.dialogs ? "Открыть диалоги →" : "Переписок пока нет"}</em></button></td><td>{ad.dialogs}</td><td>{ad.subscriptions || 0}</td><td>{ad.vkResults ?? "—"}</td><td>{replied} · {pct(replied,ad.dialogs)}%</td><td>{ad.leads} · {pct(ad.leads,replied)}%</td><td>{ad.targets} · {pct(ad.targets,replied)}%</td><td>{ad.purchases == null ? "—" : `${ad.purchases} · ${pct(ad.purchases,replied)}%`}</td><td>{ad.phones == null ? "—" : `${ad.phones} · ${pct(ad.phones,replied)}%`}</td><td>{ad.lost} · {pct(ad.lost,replied)}%</td><td>{replied?<b>{q}/100</b>:"—"}</td></tr>})}
       </tbody></table></div>
     </>}
     {panel}

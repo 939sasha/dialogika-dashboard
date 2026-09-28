@@ -1126,7 +1126,7 @@ function AdsDashboard({ stats, dialogs, serverAds, serverDialogTotal, serverStat
   }
 
   const selectedDialog = expandedPeerId === null ? null : detailDialogs.find((dialog) => dialog.peerId === expandedPeerId) || null;
-  const visibleMessages = selectedDialog && expandedStatus === "ready" ? expandedMessages : selectedDialog?.messages || [];
+  const visibleMessages = selectedDialog && expandedStatus === "ready" && expandedMessages.length ? expandedMessages : selectedDialog?.messages || [];
   const messageList = (messages: EvidenceMessage[]) => <div className="adMessageList">{messages.map((message, index) => <div className={message.role === "Менеджер" ? "adMessage manager" : "adMessage client"} key={index}><div><b>{message.role}</b><small>{message.date}</small></div><p>{message.text}</p></div>)}</div>;
   const panel = selectedAdId && <div className="adDialogOverlay" onMouseDown={(e)=>{ if(e.currentTarget===e.target) setSelectedAdId(null); }}>
     <aside className="adDialogPanel" ref={panelRef}>
@@ -1135,11 +1135,16 @@ function AdsDashboard({ stats, dialogs, serverAds, serverDialogTotal, serverStat
         <button className="adDialogBack" onClick={() => { setExpandedPeerId(null); panelRef.current?.scrollTo(0, 0); }}>← К списку диалогов</button>
         <h3>Диалог #{selectedDialog.peerId}</h3>
         <p>{selectedDialog.status} · качество {selectedDialog.score}/100 · покупка: {selectedDialog.purchase ? "да" : "нет"} · телефон: {selectedDialog.phone ? "да" : "нет"}</p>
-        {(selectedDialog.goal || selectedDialog.issue) && <div className="adDialogConclusion"><b>Классификация:</b> {[selectedDialog.goal, selectedDialog.issue].filter(Boolean).join(" · ")}</div>}
-        {expandedStatus === "loading" && <div className="adDialogLoading">Загружаю полную историю из VK. Сохранённый фрагмент показан ниже.</div>}
-        {expandedStatus === "error" && <div className="adEvidenceMissing">{expandedError} Сохранённый фрагмент показан ниже.</div>}
-        {expandedStatus === "ready" && expandedTruncated && <div className="adEvidenceMissing">Показаны последние 1000 сообщений. Более ранние сообщения не загружены.</div>}
-        {visibleMessages.length ? messageList(visibleMessages) : <div className="adEvidenceMissing">{expandedStatus === "ready" ? "В VK нет доступных сообщений этой переписки." : "Сохранённый фрагмент отсутствует. Загружаю историю из VK."}</div>}
+        <div className="adDialogConclusion">
+          <b>Классификация:</b> {[selectedDialog.goal, selectedDialog.issue].filter(Boolean).join(" · ") || "Не определена"}
+          <div className="adTranscript">
+            <strong>Переписка · {visibleMessages.length} сообщений</strong>
+            {expandedStatus === "loading" && <p>Загружаю полную историю из VK; сохранённые сообщения уже показаны.</p>}
+            {expandedStatus === "error" && <p>{expandedError} Показаны сохранённые сообщения.</p>}
+            {expandedStatus === "ready" && expandedTruncated && <p>Показаны последние 1000 сообщений. Более ранние сообщения не загружены.</p>}
+            {visibleMessages.length ? visibleMessages.map((message, index) => <div className="adTranscriptMessage" key={index}><b>{message.role} · {message.date}</b><p>{message.text}</p></div>) : <p>В VK и сохранённом отчёте нет доступных сообщений этой переписки.</p>}
+          </div>
+        </div>
       </div> : <>
       {detailStatus==="loading" && <div className="adDialogLoading">Загружаю фрагменты переписок из VK…</div>}
       {detailStatus==="error" && <div className="adDialogLoading error">{detailError}</div>}

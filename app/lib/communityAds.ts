@@ -61,6 +61,7 @@ export async function verifiedSources(client: SupabaseClient, userId: string, co
     .select("external_id,entity_type,name,parent_external_id")
     .eq("project_id", project.id).eq("platform", "vk").range(0, 4999);
   if (error) throw error;
+  if ((data || []).length === 5000) throw new Error("Список объявлений достиг предела загрузки; анализ остановлен, чтобы не потерять источники.");
   const typeOf = (type: string) => type === "campaign" || type === "ad_plan" ? "campaign" :
     type === "group" || type === "ad_group" ? "group" :
     type === "ad" || type === "banner" ? "banner" : null;

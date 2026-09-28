@@ -344,10 +344,20 @@ export async function POST(request: Request) {
       } satisfies AnalysisRow;
     }));
     const attributedRows = rawRows.filter((row): row is AnalysisRow => row !== null);
+    const withVkMarker = attributedRows.filter((row) => Boolean(row.adId)).length;
 
     const senlerAds = await getSenlerAds(parseSenlerCredential(senlerCredential), attributedRows.map((row) => row.peerId));
     for (const row of attributedRows) if (!row.adId) row.adId = senlerAds.get(row.peerId) || null;
     const rows = attributedRows.filter((row) => Boolean(row.adId) && (!allowedAds || allowedAds.has(row.adId as string)));
+    const attribution = {
+      recentConversations: active.length,
+      historiesLoaded: attributedRows.length,
+      withVkMarker,
+      withSenlerMarker: attributedRows.filter((row) => Boolean(row.adId)).length - withVkMarker,
+      matchedToAccount: rows.length,
+      taggedOutsideAccount: attributedRows.filter((row) => Boolean(row.adId) && !allowedAds.has(row.adId as string)).length,
+      withoutMarker: attributedRows.filter((row) => !row.adId).length,
+    };
     const conversationsToAnalyze = rows.filter((row) => row.hasClientMessage);
 
     const aiResult = conversationsToAnalyze.length
@@ -410,6 +420,7 @@ export async function POST(request: Request) {
       nextOffset: offset + items.length,
       totalConversations: conversations.count || 0,
       pageDialogs: active.length,
+      attribution,
       changedDialogs: rows.length,
       unchangedPeerIds,
       goalLabels: Object.fromEntries(Object.entries(GOALS).map(([key, value]) => [key, value.label])),

@@ -110,6 +110,8 @@ test("не анализирует переписку без рекламного
   assert.deepEqual(data.dialogs, []);
   assert.equal(data.ai.analyzedCount, 0);
   assert.equal(calls.length, 2);
+  assert.deepEqual(data.attribution, { recentConversations: 1, historiesLoaded: 1, withVkMarker: 0,
+    withSenlerMarker: 0, matchedToAccount: 0, taggedOutsideAccount: 0, withoutMarker: 1 });
 });
 
 test("включает рекламную рассылку в охват, но не считает её обращением и не вызывает ИИ", async () => {
@@ -142,6 +144,8 @@ test("включает рекламную рассылку в охват, но �
   assert.equal(data.dialogs[0].purchase, false);
   assert.equal(data.dialogs[0].metrics.hasPhone, false);
   assert.equal(calls.length, 2);
+  assert.equal(data.attribution.matchedToAccount, 1);
+  assert.equal(data.attribution.withVkMarker, 1);
 });
 
 test("исключает текстовую метку, отсутствующую в проверенном кабинете", async () => {
@@ -165,4 +169,6 @@ test("исключает текстовую метку, отсутствующу
   assert.equal(data.changedDialogs, 0);
   assert.deepEqual(data.dialogs, []);
   assert.equal(data.ai.analyzedCount, 0);
+  assert.equal(data.attribution.taggedOutsideAccount, 1);
+  assert.equal(data.attribution.withoutMarker, 0);
 });

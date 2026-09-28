@@ -5,12 +5,15 @@ import { createClient, SupabaseClient, User } from "@supabase/supabase-js";
 
 type Period = "30" | "60" | "90";
 type Community = { id: number; name: string; photo: string | null };
-type StoredAnalysis = { stats: LiveStats; dialogs: LiveDialog[]; period: Period; accountId?: string; savedAt?: string; version?: 5 | 6 | 7 | 8 | 9 };
+type StoredAnalysis = { stats: LiveStats; dialogs: LiveDialog[]; period: Period; accountId?: string; savedAt?: string; version?: 5 | 6 | 7 | 8 | 9 | 10 };
+type Attribution = { recentConversations: number; historiesLoaded: number; withVkMarker: number; withSenlerMarker: number; matchedToAccount: number; taggedOutsideAccount: number; withoutMarker: number };
+const emptyAttribution = (): Attribution => ({ recentConversations: 0, historiesLoaded: 0, withVkMarker: 0, withSenlerMarker: 0, matchedToAccount: 0, taggedOutsideAccount: 0, withoutMarker: 0 });
 type AnalysisCheckpoint = {
   version: 1; savedAt: number; offset: number; totalAvailable: number | null; dialogs: LiveDialog[];
   reusedPeerIds: number[]; changedPeerIds: number[]; scannedCount: number; preferredModel: string;
   objectionLabels: Record<string, string>; aiAnalyzedCount: number; fallbackCount: number;
   aiFailureReason: string; aiUsage: { inputTokens: number; outputTokens: number; totalTokens: number; estimatedCostUsd: number };
+  attribution?: Attribution;
 };
 type SavedCommunity = Community & { token: string; credentialAvailable?: boolean; latestAnalysis?: StoredAnalysis | LiveStats | null };
 type SavedSenlerConnection = { communityId: number; name: string; photo: string | null; key: string; credentialAvailable?: boolean };
@@ -32,6 +35,7 @@ type LiveStats = {
   ads: AdStat[];
   priority: "speed" | "objections" | "balanced";
   ai: { model: string; analyzedCount: number; fallbackCount: number; inputTokens: number; outputTokens: number; totalTokens: number; estimatedCostUsd: number; nuances: string[]; recommendations: string[]; reusedCount?: number; changedCount?: number };
+  attribution?: Attribution;
 };
 
 export default function Home() {
@@ -47,6 +51,7 @@ export default function Home() {
   const [openaiKey, setOpenaiKey] = useState("");
   const [senlerConnections, setSenlerConnections] = useState<SavedSenlerConnection[]>([]);
   const [adAccounts, setAdAccounts] = useState<DashboardAccount[]>([]);
+  const [sourceProfile, setSourceProfile] = useState<{ miniAppAds: number; senlerConnected: boolean } | null>(null);
   const [adAssignments, setAdAssignments] = useState<Record<string, string | null>>({});
   const [serverAds, setServerAds] = useState<AdStat[]>([]);
   const [serverAdDialogTotal, setServerAdDialogTotal] = useState(0);
@@ -144,6 +149,19 @@ export default function Home() {
       .catch((error) => { if (!cancelled) { setServerAdsError(error instanceof Error ? error.message : "Не удалось загрузить объявления"); setServerAdsStatus("error"); } });
     return () => { cancelled = true; };
   }, [tab, accessToken, community]);
+  useEffect(() => {
+    queueMicrotask(() => setSourceProfile(null));
+    if (!accessToken || !community || !adAssignments[String(community.id)]) return;
+    let cancelled = false;
+    fetch(`/api/ads/sources?communityId=${community.id}`, { headers: { authorization: `Bearer ${accessToken}` } })
+      .then(async (response) => {
+        if (!response.ok) throw new Error("Источники недоступны");
+        return response.json() as Promise<{ miniAppAds?: number; senlerConnected?: boolean }>;
+      })
+      .then((result) => { if (!cancelled) setSourceProfile({ miniAppAds: result.miniAppAds || 0, senlerConnected: Boolean(result.senlerConnected) }); })
+      .catch(() => { if (!cancelled) setSourceProfile(null); });
+    return () => { cancelled = true; };
+  }, [accessToken, community, adAssignments]);
   const data = liveStats ? {
     dialogs: liveStats.dialogs,
     leads: liveStats.leads,
@@ -434,16 +452,10 @@ export default function Home() {
 
     const savedFromAccount = connections.find((item) => item.id === community.id)?.latestAnalysis;
     const previous = newerAnalysis(savedFromAccount, cachedAnalysis(community.id), adAssignments[String(community.id)], community.id);
-    const reusable = previous && "stats" in previous && previous.version === 9 ? previous : null;
-    const reusableDialogs = new Map<number, LiveDialog>();
-    for (const dialog of reusable?.dialogs || []) {
-      if (dialog.revision && dialog.metrics && Boolean(dialog.adId)) reusableDialogs.set(dialog.peerId, dialog);
-    }
-    const knownRevisions = Object.fromEntries(
-      [...reusableDialogs.values()].map((dialog) => [String(dialog.peerId), dialog.revision as string]),
-    );
-    const incremental = reusableDialogs.size > 0;
-    const checkpointKey = `dialogika-analysis-checkpoint-v2:${user?.id || ""}:${community.id}:${period}`;
+    // Scan each recent VK conversation so the attribution audit has complete denominators.
+    const knownRevisions = {};
+    const incremental = false;
+    const checkpointKey = `dialogika-analysis-checkpoint-v3:${user?.id || ""}:${community.id}:${period}`;
     let checkpoint: AnalysisCheckpoint | null = null;
     try {
       const saved = sessionStorage.getItem(checkpointKey);
@@ -469,7 +481,7 @@ export default function Home() {
       let done = false;
       let totalAvailable: number | null = checkpoint?.totalAvailable ?? null;
       const parallelPages = 1;
-      let preferredModel = checkpoint?.preferredModel || reusable?.stats.ai.model?.split(",")[0]?.trim() || "";
+      let preferredModel = checkpoint?.preferredModel || (previous && "stats" in previous ? previous.stats.ai.model?.split(",")[0]?.trim() : "") || "";
       let objectionLabels: Record<string, string> = checkpoint?.objectionLabels || {};
       const dialogMap = new Map<number, LiveDialog>((checkpoint?.dialogs || []).map((dialog) => [dialog.peerId, dialog]));
       const reusedPeerIds = new Set<number>(checkpoint?.reusedPeerIds || []);
@@ -480,6 +492,7 @@ export default function Home() {
       let newFallbackCount = checkpoint?.fallbackCount || 0;
       let aiFailureReason = checkpoint?.aiFailureReason || "";
       const aiUsage = checkpoint?.aiUsage || { inputTokens: 0, outputTokens: 0, totalTokens: 0, estimatedCostUsd: 0 };
+      const attribution = checkpoint?.attribution || emptyAttribution();
 
       const fetchPage = async (pageOffset: number, model: string) => {
         let response: Response | null = null;
@@ -524,6 +537,7 @@ export default function Home() {
           dialogs?: LiveDialog[];
           unchangedPeerIds?: number[];
           pageDialogs?: number;
+          attribution?: Attribution;
           changedDialogs?: number;
           done?: boolean;
           nextOffset?: number;
@@ -559,13 +573,10 @@ export default function Home() {
         for (const result of pageResults) {
           objectionLabels = result.objectionLabels || objectionLabels;
           scannedCount += result.pageDialogs ?? ((result.unchangedPeerIds?.length || 0) + (result.dialogs?.length || 0));
+          if (!result.attribution) throw new Error("Сервер не вернул сверку рекламных меток; отчёт не сохранён.");
+          for (const key of Object.keys(attribution) as Array<keyof Attribution>) attribution[key] += result.attribution[key] || 0;
 
-          for (const peerId of result.unchangedPeerIds || []) {
-            const cached = reusableDialogs.get(peerId);
-            if (!cached || (verifiedAdIds && !verifiedAdIds.has(cached.adId || ""))) continue;
-            dialogMap.set(peerId, cached);
-            reusedPeerIds.add(peerId);
-          }
+          if (result.unchangedPeerIds?.length) throw new Error("Сервер пропустил переписки при полной сверке; отчёт не сохранён.");
 
           for (const dialog of result.dialogs || []) {
             if (verifiedAdIds && !verifiedAdIds.has(dialog.adId || "")) continue;
@@ -602,6 +613,7 @@ export default function Home() {
             reusedPeerIds: [...reusedPeerIds], changedPeerIds: [...changedPeerIds], scannedCount,
             preferredModel, objectionLabels, aiAnalyzedCount: newAiAnalyzedCount,
             fallbackCount: newFallbackCount, aiFailureReason, aiUsage,
+            attribution,
           } satisfies AnalysisCheckpoint;
           sessionStorage.setItem(checkpointKey, JSON.stringify(nextCheckpoint));
           checkpoint = nextCheckpoint;
@@ -620,6 +632,11 @@ export default function Home() {
       const analyzedDialogs = [...dialogMap.values()]
         .filter((dialog) => Boolean(dialog.metrics && dialog.adId && (!verifiedAdIds || verifiedAdIds.has(dialog.adId))))
         .sort((a, b) => (b.lastMessageDate || 0) - (a.lastMessageDate || 0));
+      if (analyzedDialogs.length !== attribution.matchedToAccount ||
+          attribution.historiesLoaded !== attribution.matchedToAccount + attribution.taggedOutsideAccount + attribution.withoutMarker ||
+          attribution.withVkMarker + attribution.withSenlerMarker !== attribution.matchedToAccount + attribution.taggedOutsideAccount) {
+        throw new Error("Сверка рекламных меток не сошлась; отчёт не сохранён. Повторите полный анализ.");
+      }
       const cutoff = Math.floor(Date.now() / 1000) - Number(period) * 86400;
       const totals = { dialogs: analyzedDialogs.length, replies: 0, leads: 0, contacts: 0, targets: 0, lost: 0, responseSum: 0, responseCount: 0, slowResponse: 0, noNextStep: 0, unanswered: 0 };
       const objectionTotals: Record<string, number> = {};
@@ -710,7 +727,7 @@ export default function Home() {
         ads: Object.values(adTotals).sort((a, b) => b.dialogs - a.dialogs),
         priority,
         ai: {
-          model: [...aiModels].join(", ") || reusable?.stats.ai.model || "резервный алгоритм",
+          model: [...aiModels].join(", ") || "резервный алгоритм",
           analyzedCount: totalAiAnalyzed,
           fallbackCount: totalFallback,
           inputTokens: aiUsage.inputTokens,
@@ -722,6 +739,7 @@ export default function Home() {
           reusedCount: reusedPeerIds.size,
           changedCount: changedPeerIds.size,
         },
+        attribution,
       };
 
       setLiveStats(completedStats);
@@ -734,7 +752,7 @@ export default function Home() {
         period,
         accountId: adAssignments[String(community.id)] || undefined,
         savedAt: new Date().toISOString(),
-        version: 9,
+        version: 10,
       };
       setConnections((current) => current.map((item) => item.id === community.id ? { ...item, latestAnalysis: storedAnalysis } : item));
       cacheAnalysis(community.id, storedAnalysis);
@@ -847,6 +865,16 @@ export default function Home() {
               <Metric label="Заказ, запись или покупка" value={data.measurements.toLocaleString("ru-RU")} hint={`${pct(data.measurements, data.leads)}% от заинтересованных`} description="В переписке подтверждены заказ, запись, договор, покупка или оплата. Один лишь вопрос о цене сюда не входит." />
               <Metric label="Среднее время ответа" value={data.response} danger={liveStats.responseMeasured && liveStats.averageResponse > 300} hint={liveStats.responseMeasured ? "между вопросом и ответом" : "в периоде нет пар вопрос–ответ"} description="Среднее время от первого входящего сообщения клиента до следующего ответа сообщества." />
             </div>
+            {sourceProfile?.miniAppAds ? <article className="card attributionCard">
+              <b>Подписки и переписки — разные события</b>
+              <p>В выбранном кабинете {sourceProfile.miniAppAds} объявлений ведут в VK Mini App. Результат «Подписаться на рассылку» может появиться без сообщения в сообщество, поэтому число подписок нельзя считать числом переписок.</p>
+              {!sourceProfile.senlerConnected && <p>Senler для этого сообщества не подключён. Подписки без сообщений сейчас нельзя сверить по людям и объявлениям. <button onClick={() => setTab("Настройки")}>Подключить Senler →</button></p>}
+            </article> : null}
+            {liveStats.attribution && <article className="card attributionCard">
+              <b>Сверка рекламных меток за {period} дней</b>
+              <p>Переписок с сообщениями за период: {liveStats.attribution.recentConversations}. Историю удалось прочитать у {liveStats.attribution.historiesLoaded}. Метка VK найдена у {liveStats.attribution.withVkMarker}, метка Senler — у {liveStats.attribution.withSenlerMarker}. К выбранному кабинету относятся {liveStats.attribution.matchedToAccount}; метка другого или неизвестного объявления — у {liveStats.attribution.taggedOutsideAccount}; без рекламной метки — {liveStats.attribution.withoutMarker}.</p>
+              <small>В сверку входят только диалоги, которые VK вернул с сообщением за период. Подписки в мини-приложении без сообщений сюда не входят.</small>
+            </article>}
 
             <div className="gridMain">
               <article className="card funnelCard">

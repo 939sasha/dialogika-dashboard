@@ -24,7 +24,22 @@ export async function GET(request: Request) {
   }
   try {
     const { client, user } = await authorizedClient(request);
-    return Response.json(await verifiedSources(client, user.id, communityId));
+    const sources = await verifiedSources(client, user.id, communityId);
+    const { data: project, error: projectError } = await client.from("projects").select("id")
+      .eq("user_id", user.id).eq("connection_type", "api").eq("vk_account_id", sources.accountId).maybeSingle();
+    if (projectError || !project) throw projectError || new Error("Кабинет не найден");
+    const { data: ads, error: adsError } = await client.from("ad_entities").select("raw_payload")
+      .eq("project_id", project.id).eq("platform", "vk").in("entity_type", ["ad", "banner"]).range(0, 4999);
+    if (adsError) throw adsError;
+    if ((ads || []).length === 5000) throw new Error("Список объявлений достиг предела загрузки; источники требуется синхронизировать по страницам.");
+    const miniAppAds = (ads || []).filter((item) => {
+      const payload = item.raw_payload as { urls?: { primary?: { url_object_type?: string } } } | null;
+      return payload?.urls?.primary?.url_object_type === "vk_miniapp_page";
+    }).length;
+    const { data: senler, error: senlerError } = await client.from("dialogika_connections").select("id")
+      .eq("user_id", user.id).eq("kind", "senler").eq("external_id", communityId).maybeSingle();
+    if (senlerError) throw senlerError;
+    return Response.json({ ...sources, miniAppAds, senlerConnected: Boolean(senler) });
   } catch (error) {
     const message = error instanceof Error ? error.message : "VK Ads недоступен";
     return Response.json({ error: message }, { status: message === "Требуется вход" ? 401 : 503 });

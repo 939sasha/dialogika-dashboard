@@ -40,6 +40,7 @@ h1 { margin:0; font-size:27px; letter-spacing:-1px; } h2 { margin:0 0 8px; font-
 .period button { border:0;background:transparent;padding:8px 13px;border-radius:7px;font-size:12px;color:#777; }
 .period button.selected { background:#fff;color:#222;font-weight:700;box-shadow:0 1px 5px #29212917; }
 .metrics { display:grid;grid-template-columns:repeat(5,1fr);background:white;border:1px solid var(--line);border-radius:13px; }
+.attributionCard{margin-top:14px;padding:18px 22px}.attributionCard b{font-size:14px}.attributionCard p{font-size:12px;line-height:1.55;color:var(--muted);margin:9px 0 0}.attributionCard small{display:block;margin-top:8px;color:var(--muted);line-height:1.5}.attributionCard button{border:0;background:none;padding:0;color:var(--purple);font-weight:700;cursor:pointer}
 .metric { padding:19px 21px; border-right:1px solid var(--line); }.metric:last-child{border:0}
 .metric .metricDescription{margin:10px 0 0;color:var(--muted);font-size:11px;line-height:1.45}.adDefinitions{margin:0 0 14px;color:var(--muted);font-size:12px;line-height:1.55}
 .metric span,.metric small { display:block; font-size:11px;color:var(--muted); }.metric strong { display:block;font-size:27px;margin:9px 0 6px;letter-spacing:-1px;}.metric strong.danger{color:var(--orange)} .metric small.up{color:var(--green);font-weight:700}

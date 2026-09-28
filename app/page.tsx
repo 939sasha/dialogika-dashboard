@@ -374,10 +374,24 @@ export default function Home() {
     let verifiedAdIds: Set<string> | null = null;
     if (adAssignments[String(community.id)]) {
       try {
-        const response = await fetch(`/api/ads/sources?communityId=${community.id}`, {
+        let response = await fetch(`/api/ads/sources?communityId=${community.id}`, {
           headers: { authorization: `Bearer ${accessToken}` },
         });
-        const result = await response.json() as { accountId?: string; source?: "api" | "dashboard" | "dashboard-groups"; sources?: Array<{ adId: string }>; error?: string };
+        let result = await response.json() as { accountId?: string; source?: "api" | "dashboard" | "dashboard-groups"; sources?: Array<{ adId: string }>; error?: string };
+        if (response.ok && result.accountId === adAssignments[String(community.id)] && result.source === "dashboard-groups") {
+          setNotice("Получаем ID объявлений выбранного кабинета…");
+          const syncResponse = await fetch("/api/ads/sources", {
+            method: "POST",
+            headers: { authorization: `Bearer ${accessToken}`, "content-type": "application/json" },
+            body: JSON.stringify({ communityId: String(community.id) }),
+          });
+          const syncResult = await syncResponse.json() as { error?: string };
+          if (!syncResponse.ok) throw new Error(syncResult.error || "Не удалось обновить объявления кабинета");
+          response = await fetch(`/api/ads/sources?communityId=${community.id}`, {
+            headers: { authorization: `Bearer ${accessToken}` }, cache: "no-store",
+          });
+          result = await response.json();
+        }
         if (!response.ok || result.accountId !== adAssignments[String(community.id)] || !result.sources?.length) {
           throw new Error(result.error || "Не удалось подтвердить источники выбранного кабинета");
         }

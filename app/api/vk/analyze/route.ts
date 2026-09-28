@@ -272,7 +272,7 @@ function analyzeDialog(messages: VkMessage[]) {
 
 export async function POST(request: Request) {
   try {
-    const { token, openaiKey, senlerCredential, preferredModel, groupId, communityName, days = 30, offset = 0, knownRevisions = {}, verifiedAdIds, senlerAdByPeer } = await request.json() as {
+    const { token, openaiKey, senlerCredential, preferredModel, groupId, communityName, days = 30, offset = 0, knownRevisions = {}, verifiedAdIds, senlerAdByPeer, senlerCandidatePeerIds } = await request.json() as {
       token?: string;
       openaiKey?: string;
       senlerCredential?: string;
@@ -284,6 +284,7 @@ export async function POST(request: Request) {
       knownRevisions?: Record<string, string>;
       verifiedAdIds?: string[];
       senlerAdByPeer?: Record<string, string>;
+      senlerCandidatePeerIds?: number[];
     };
     if (!token || !groupId || ![30, 60, 90].includes(days) || offset < 0 ||
         (!Array.isArray(verifiedAdIds) || !verifiedAdIds.length)) {
@@ -425,6 +426,7 @@ export async function POST(request: Request) {
       totalConversations: conversations.count || 0,
       pageDialogs: active.length,
       attribution,
+      senlerRecentPeerIds: attributedRows.filter((row) => senlerCandidatePeerIds?.includes(row.peerId)).map((row) => row.peerId),
       changedDialogs: rows.length,
       unchangedPeerIds,
       goalLabels: Object.fromEntries(Object.entries(GOALS).map(([key, value]) => [key, value.label])),

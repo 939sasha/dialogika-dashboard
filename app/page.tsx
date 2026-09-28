@@ -377,9 +377,12 @@ export default function Home() {
         const response = await fetch(`/api/ads/sources?communityId=${community.id}`, {
           headers: { authorization: `Bearer ${accessToken}` },
         });
-        const result = await response.json() as { accountId?: string; sources?: Array<{ adId: string }>; error?: string };
+        const result = await response.json() as { accountId?: string; source?: "api" | "dashboard" | "dashboard-groups"; sources?: Array<{ adId: string }>; error?: string };
         if (!response.ok || result.accountId !== adAssignments[String(community.id)] || !result.sources?.length) {
           throw new Error(result.error || "Не удалось подтвердить источники выбранного кабинета");
+        }
+        if (result.source === "dashboard-groups") {
+          throw new Error("В выбранном кабинете доступны только ID групп, а метки переписок указывают на объявления. Анализ остановлен: нужен действующий API-доступ для синхронизации объявлений. Предыдущий отчёт сохранён.");
         }
         verifiedAdIds = new Set(result.sources.map((source) => source.adId));
       } catch (error) {

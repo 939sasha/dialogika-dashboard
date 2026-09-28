@@ -11,7 +11,7 @@ export async function dashboardAccounts(client: SupabaseClient, userId: string) 
     for (let offset = 0; offset < 5000; offset += 1000) {
       const { data: entities, error: entityError } = await client.from("ad_entities")
         .select("project_id").in("project_id", projects.map((item) => item.id))
-        .eq("platform", "vk").in("entity_type", ["ad", "ad_group"])
+        .eq("platform", "vk").in("entity_type", ["ad", "banner"])
         .order("project_id").order("id")
         .range(offset, offset + 999);
       if (entityError) throw entityError;

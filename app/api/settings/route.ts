@@ -86,10 +86,11 @@ export async function PUT(request: Request) {
   if (body.adAccountId !== undefined) {
     if (body.kind !== "vk") return Response.json({ error: "Некорректные данные" }, { status: 400 });
     if (body.adAccountId) {
-      const accounts = await dashboardAccounts(auth.client, auth.user.id);
-      if (!accounts.some((item) => item.accountId === body.adAccountId && item.sourcesAvailable)) {
-        return Response.json({ error: "Кабинет не найден или объявления ещё не синхронизированы в дашборде" }, { status: 400 });
-      }
+      const { data: account, error: accountError } = await auth.client.from("projects")
+        .select("id").eq("user_id", auth.user.id).eq("connection_type", "api")
+        .eq("vk_account_id", body.adAccountId).maybeSingle();
+      if (accountError) return Response.json({ error: accountError.message }, { status: 500 });
+      if (!account) return Response.json({ error: "Кабинет не найден в вашем дашборде" }, { status: 400 });
     }
     const { data, error } = await auth.client.from("dialogika_connections")
       .update({ ad_account_id: body.adAccountId || null, updated_at: new Date().toISOString() })

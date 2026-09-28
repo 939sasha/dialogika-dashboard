@@ -49,15 +49,17 @@ export async function assignedAccount(client: SupabaseClient, userId: string, co
 export async function verifiedSources(client: SupabaseClient, userId: string, communityId: string) {
   const accountId = await assignedAccount(client, userId, communityId);
   if (!accountId) throw new Error("Выберите рекламный кабинет для этого сообщества в настройках");
-  const accounts = await dashboardAccounts(client, userId);
-  const project = accounts.find((item) => item.accountId === accountId);
+  const { data: project, error: projectError } = await client.from("projects")
+    .select("id,name,vk_account_id").eq("user_id", userId).eq("connection_type", "api")
+    .eq("vk_account_id", accountId).maybeSingle();
+  if (projectError) throw projectError;
   if (!project) throw new Error("Выбранный кабинет отсутствует в вашем дашборде");
   if (accountId === EMALIS_ACCOUNT_ID) {
     return { accountId, accountName: project.name, sources: await verifiedEmalisSources(client), source: "api" as const };
   }
   const { data, error } = await client.from("ad_entities")
     .select("external_id,entity_type,name,parent_external_id")
-    .eq("project_id", project.projectId).eq("platform", "vk").range(0, 4999);
+    .eq("project_id", project.id).eq("platform", "vk").range(0, 4999);
   if (error) throw error;
   const typeOf = (type: string) => type === "campaign" || type === "ad_plan" ? "campaign" :
     type === "group" || type === "ad_group" ? "group" :
@@ -72,7 +74,7 @@ export async function verifiedSources(client: SupabaseClient, userId: string, co
   const byId = new Map(sources.map((item) => [item.adId, item]));
   for (let offset = 0; offset < 5000; offset += 1000) {
     const { data: campaigns, error: campaignError } = await client.from("campaigns")
-      .select("external_id,name").eq("project_id", project.projectId).range(offset, offset + 999);
+      .select("external_id,name").eq("project_id", project.id).range(offset, offset + 999);
     if (campaignError) throw campaignError;
     for (const item of campaigns || []) {
       const id = String(item.external_id);
@@ -84,5 +86,5 @@ export async function verifiedSources(client: SupabaseClient, userId: string, co
   }
   if (!byId.size) throw new Error("Для этого кабинета в дашборде ещё нет синхронизированных источников");
   return { accountId, accountName: project.name, sources: [...byId.values()],
-    source: project.adDetailAvailable ? "dashboard" as const : "dashboard-groups" as const };
+    source: sources.some((item) => item.matchType === "banner") ? "dashboard" as const : "dashboard-groups" as const };
 }

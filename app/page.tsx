@@ -252,15 +252,11 @@ export default function Home() {
         setNotice(`Рекламный кабинет отключён от сообщества «${community.name}».`);
         return;
       }
-      const response = await fetch(`/api/ads/sources?communityId=${community.id}`, {
-        headers: { authorization: `Bearer ${accessToken}` },
-      });
-      const result = await response.json() as { sources?: unknown[]; source?: string; error?: string };
-      if (!response.ok || !result.sources?.length) throw new Error(result.error || "Кабинет VK Ads не вернул объявления");
       setAdAssignments((current) => ({ ...current, [String(community.id)]: accountId }));
       const saved = connections.find((item) => item.id === community.id)?.latestAnalysis;
       restoreAnalysis(newerAnalysis(saved, cachedAnalysis(community.id), accountId, community.id));
-      setNotice(`Кабинет подключён к сообществу «${community.name}». Найдено ${result.sources.length} источников.${result.source === "dashboard-groups" ? " В дашборде пока есть только ID групп: для меток отдельных объявлений потребуется их синхронизация." : ""}`);
+      const selectedAccount = adAccounts.find((item) => item.accountId === accountId);
+      setNotice(`Кабинет «${selectedAccount?.name || accountId}» сохранён для сообщества «${community.name}».${selectedAccount?.adDetailAvailable ? "" : " Сейчас доступны ID групп; метки отдельных объявлений появятся после синхронизации."}`);
     } catch (error) {
       setNotice(error instanceof Error ? error.message : "Не удалось подключить VK Ads");
     } finally {
@@ -967,7 +963,7 @@ function Settings({ community, connections, openaiConnected, senlerConnected, ad
           <option value="">Не выбран</option>
           {adAccounts.map((item) => <option key={item.projectId} value={item.accountId} disabled={!item.sourcesAvailable}>{item.name} · ID {item.accountId}{item.adDetailAvailable ? "" : " · пока только группы"}</option>)}
         </select></label>
-        <button className="primary wide" disabled={busy || !community || vkAdsValue === adAccountId} onClick={() => onConnectVkAds(vkAdsValue)}>{busy ? "Проверяю кабинет…" : "Сохранить выбор →"}</button>
+        <button className="primary wide" disabled={busy || !community || vkAdsValue === adAccountId} onClick={() => onConnectVkAds(vkAdsValue)}>{busy ? "Сохраняю выбор…" : vkAdsValue === adAccountId && community ? "Выбор сохранён ✓" : "Сохранить выбор →"}</button>
         <p className="securityNote">Все кабинеты берутся из вашего дашборда. Если там пока сохранены только группы, метки отдельных объявлений появятся в сверке после синхронизации их ID.</p>
       </article>
       <article className="card connectionCard">

@@ -5,7 +5,7 @@ import { createClient, SupabaseClient, User } from "@supabase/supabase-js";
 
 type Period = "30" | "60" | "90";
 type Community = { id: number; name: string; photo: string | null };
-type StoredAnalysis = { stats: LiveStats; dialogs: LiveDialog[]; period: Period; savedAt?: string; version?: 5 | 6 | 7 };
+type StoredAnalysis = { stats: LiveStats; dialogs: LiveDialog[]; period: Period; savedAt?: string; version?: 5 | 6 | 7 | 8 };
 type AnalysisCheckpoint = {
   version: 1; savedAt: number; offset: number; totalAvailable: number | null; dialogs: LiveDialog[];
   reusedPeerIds: number[]; changedPeerIds: number[]; scannedCount: number; preferredModel: string;
@@ -44,6 +44,7 @@ export default function Home() {
   const [token, setToken] = useState("");
   const [openaiKey, setOpenaiKey] = useState("");
   const [senlerConnections, setSenlerConnections] = useState<SavedSenlerConnection[]>([]);
+  const [vkAdsConnected, setVkAdsConnected] = useState(false);
   const [serverAds, setServerAds] = useState<AdStat[]>([]);
   const [serverAdDialogTotal, setServerAdDialogTotal] = useState(0);
   const [adCabinet, setAdCabinet] = useState<{ connected: boolean; accountId: string | null; cachedMatches?: number } | null>(null);
@@ -79,7 +80,7 @@ export default function Home() {
     let cancelled = false;
     (async () => {
       const response = await fetch("/api/settings", { headers: { authorization: `Bearer ${accessToken}` } });
-      const result = await response.json() as { communities?: SavedCommunity[]; routerKey?: string; routerCredentialAvailable?: boolean; senlerConnections?: SavedSenlerConnection[]; credentialRecoveryNeeded?: boolean; error?: string };
+      const result = await response.json() as { communities?: SavedCommunity[]; routerKey?: string; routerCredentialAvailable?: boolean; senlerConnections?: SavedSenlerConnection[]; vkAdsConnected?: boolean; credentialRecoveryNeeded?: boolean; error?: string };
       if (!response.ok) throw new Error(result.error || "Не удалось загрузить подключения");
       let saved = result.communities || [];
       const local = JSON.parse(localStorage.getItem("dialogika.communities.v1") || "[]") as SavedCommunity[];
@@ -102,6 +103,7 @@ export default function Home() {
       setConnections(saved);
       setOpenaiKey(result.routerKey || localRouter);
       setSenlerConnections(result.senlerConnections || []);
+      setVkAdsConnected(Boolean(result.vkAdsConnected));
       if (result.credentialRecoveryNeeded) {
         setNotice("Подключения найдены, но серверный ключ шифрования недоступен. Сохранённые данные и последний анализ восстановлены; ключи VK, Router Cheap и Senler пока нельзя использовать.");
       }
@@ -234,6 +236,27 @@ export default function Home() {
     }
   }
 
+  async function connectVkAds(value: string) {
+    setBusy(true);
+    setNotice("");
+    try {
+      const credential = value.trim().replace(/^Bearer\s+/i, "").replace(/^["']|["']$/g, "").trim();
+      await saveSetting({ kind: "vk_ads", externalId: "29867480", name: "VK Ads Эмалис", credential }, accessToken);
+      const response = await fetch("/api/ads/sources?communityId=109534321", {
+        headers: { authorization: `Bearer ${accessToken}` },
+      });
+      const result = await response.json() as { sources?: unknown[]; error?: string };
+      if (!response.ok || !result.sources?.length) throw new Error(result.error || "Кабинет VK Ads не вернул объявления");
+      setVkAdsConnected(true);
+      setNotice(`Кабинет «Эмалис» подключён. Подтверждено ${result.sources.length} источников VK Ads.`);
+    } catch (error) {
+      setVkAdsConnected(false);
+      setNotice(error instanceof Error ? error.message : "Не удалось подключить VK Ads");
+    } finally {
+      setBusy(false);
+    }
+  }
+
   function selectCommunity(item: SavedCommunity) {
     setCommunity({ id: item.id, name: item.name, photo: item.photo });
     setToken(item.token);
@@ -336,12 +359,29 @@ export default function Home() {
       return;
     }
 
+    let verifiedAdIds: Set<string> | null = null;
+    if (community.id === 109534321) {
+      try {
+        const response = await fetch(`/api/ads/sources?communityId=${community.id}`, {
+          headers: { authorization: `Bearer ${accessToken}` },
+        });
+        const result = await response.json() as { accountId?: string; sources?: Array<{ adId: string }>; error?: string };
+        if (!response.ok || result.accountId !== "29867480" || !result.sources?.length) {
+          throw new Error(result.error || "Не удалось подтвердить источники кабинета «Эмалис»");
+        }
+        verifiedAdIds = new Set(result.sources.map((source) => source.adId));
+      } catch (error) {
+        setNotice(error instanceof Error ? error.message : "VK Ads недоступен. Предыдущий отчёт сохранён.");
+        return;
+      }
+    }
+
     const savedFromAccount = connections.find((item) => item.id === community.id)?.latestAnalysis;
     const previous = newerAnalysis(savedFromAccount, cachedAnalysis(community.id));
-    const reusable = previous && "stats" in previous && (previous.version === 5 || previous.version === 6 || previous.version === 7) ? previous : null;
+    const reusable = previous && "stats" in previous && (previous.version === 5 || previous.version === 6 || previous.version === 7 || previous.version === 8) ? previous : null;
     const reusableDialogs = new Map<number, LiveDialog>();
     for (const dialog of reusable?.dialogs || []) {
-      if (dialog.revision && dialog.metrics && (reusable?.version === 7 ? Boolean(dialog.adId) : /^\d{5,}$/.test(dialog.adId || ""))) reusableDialogs.set(dialog.peerId, dialog);
+      if (dialog.revision && dialog.metrics && ((reusable?.version === 7 || reusable?.version === 8) ? Boolean(dialog.adId) : /^\d{5,}$/.test(dialog.adId || ""))) reusableDialogs.set(dialog.peerId, dialog);
     }
     const knownRevisions = Object.fromEntries(
       [...reusableDialogs.values()].map((dialog) => [String(dialog.peerId), dialog.revision as string]),
@@ -403,6 +443,7 @@ export default function Home() {
                 days: Number(period),
                 offset: pageOffset,
                 knownRevisions,
+                verifiedAdIds: verifiedAdIds ? [...verifiedAdIds] : undefined,
               }),
             });
             responseText = await response.text();
@@ -464,12 +505,13 @@ export default function Home() {
 
           for (const peerId of result.unchangedPeerIds || []) {
             const cached = reusableDialogs.get(peerId);
-            if (!cached) continue;
+            if (!cached || (verifiedAdIds && !verifiedAdIds.has(cached.adId || ""))) continue;
             dialogMap.set(peerId, cached);
             reusedPeerIds.add(peerId);
           }
 
           for (const dialog of result.dialogs || []) {
+            if (verifiedAdIds && !verifiedAdIds.has(dialog.adId || "")) continue;
             dialogMap.set(dialog.peerId, dialog);
             changedPeerIds.add(dialog.peerId);
             reusedPeerIds.delete(dialog.peerId);
@@ -519,7 +561,7 @@ export default function Home() {
       }
 
       const analyzedDialogs = [...dialogMap.values()]
-        .filter((dialog) => Boolean(dialog.metrics && dialog.adId))
+        .filter((dialog) => Boolean(dialog.metrics && dialog.adId && (!verifiedAdIds || verifiedAdIds.has(dialog.adId))))
         .sort((a, b) => (b.lastMessageDate || 0) - (a.lastMessageDate || 0));
       const cutoff = Math.floor(Date.now() / 1000) - Number(period) * 86400;
       const totals = { dialogs: analyzedDialogs.length, replies: 0, leads: 0, contacts: 0, targets: 0, lost: 0, responseSum: 0, responseCount: 0, slowResponse: 0, noNextStep: 0, unanswered: 0 };
@@ -634,7 +676,7 @@ export default function Home() {
         dialogs: analyzedDialogs,
         period,
         savedAt: new Date().toISOString(),
-        version: 7,
+        version: 8,
       };
       setConnections((current) => current.map((item) => item.id === community.id ? { ...item, latestAnalysis: storedAnalysis } : item));
       cacheAnalysis(community.id, storedAnalysis);
@@ -803,7 +845,7 @@ export default function Home() {
         {tab === "Диалоги" && <DialogsTable query={query} setQuery={setQuery} filteredDialogs={filteredDialogs} analyzed={Boolean(liveStats)} />}
         {tab === "Качество" && <Quality stats={liveStats} />}
         {tab === "ИИ-бот" && <Bot goal={liveStats?.goal} />}
-        {tab === "Настройки" && <Settings community={community} connections={connections} openaiConnected={Boolean(openaiKey)} senlerConnected={Boolean(community && senlerConnections.some((item) => item.communityId === community.id && Boolean(item.key)))} busy={busy} onConnect={connectCommunity} onSelect={selectCommunity} onConnectOpenAI={connectOpenAI} onConnectSenler={connectSenler} onDisconnectOpenAI={async () => { await deleteSetting("router", "default", accessToken); setOpenaiKey(""); setNotice("Router Cheap отключён. Ключ удалён из вашего аккаунта."); }} onDisconnectSenler={async () => { if (!community) return; await deleteSetting("senler", String(community.id), accessToken); setSenlerConnections((current) => current.filter((item) => item.communityId !== community.id)); setNotice("Senler отключён. Ключ удалён из вашего аккаунта."); }} onDisconnect={disconnectCommunity} />}
+        {tab === "Настройки" && <Settings community={community} connections={connections} openaiConnected={Boolean(openaiKey)} senlerConnected={Boolean(community && senlerConnections.some((item) => item.communityId === community.id && Boolean(item.key)))} vkAdsConnected={vkAdsConnected} busy={busy} onConnect={connectCommunity} onSelect={selectCommunity} onConnectOpenAI={connectOpenAI} onConnectSenler={connectSenler} onConnectVkAds={connectVkAds} onDisconnectOpenAI={async () => { await deleteSetting("router", "default", accessToken); setOpenaiKey(""); setNotice("Router Cheap отключён. Ключ удалён из вашего аккаунта."); }} onDisconnectSenler={async () => { if (!community) return; await deleteSetting("senler", String(community.id), accessToken); setSenlerConnections((current) => current.filter((item) => item.communityId !== community.id)); setNotice("Senler отключён. Ключ удалён из вашего аккаунта."); }} onDisconnect={disconnectCommunity} />}
       </section>
     </main>
   );
@@ -857,11 +899,12 @@ function Login({ client }: { client: SupabaseClient | null }) {
   </section></main>;
 }
 
-function Settings({ community, connections, openaiConnected, senlerConnected, busy, onConnect, onSelect, onConnectOpenAI, onConnectSenler, onDisconnectOpenAI, onDisconnectSenler, onDisconnect }: { community: Community | null; connections: SavedCommunity[]; openaiConnected: boolean; senlerConnected: boolean; busy: boolean; onConnect: (token: string) => void; onSelect: (community: SavedCommunity) => void; onConnectOpenAI: (key: string) => void; onConnectSenler: (key: string, groupId: string) => void; onDisconnectOpenAI: () => void; onDisconnectSenler: () => void; onDisconnect: () => void }) {
+function Settings({ community, connections, openaiConnected, senlerConnected, vkAdsConnected, busy, onConnect, onSelect, onConnectOpenAI, onConnectSenler, onConnectVkAds, onDisconnectOpenAI, onDisconnectSenler, onDisconnect }: { community: Community | null; connections: SavedCommunity[]; openaiConnected: boolean; senlerConnected: boolean; vkAdsConnected: boolean; busy: boolean; onConnect: (token: string) => void; onSelect: (community: SavedCommunity) => void; onConnectOpenAI: (key: string) => void; onConnectSenler: (key: string, groupId: string) => void; onConnectVkAds: (key: string) => void; onDisconnectOpenAI: () => void; onDisconnectSenler: () => void; onDisconnect: () => void }) {
   const [value, setValue] = useState("");
   const [aiValue, setAiValue] = useState("");
   const [senlerValue, setSenlerValue] = useState("");
   const [senlerGroupId, setSenlerGroupId] = useState("");
+  const [vkAdsValue, setVkAdsValue] = useState("");
   const selectedConnection = community ? connections.find((item) => item.id === community.id) : null;
   const vkCredentialNeedsRecovery = selectedConnection?.credentialAvailable === false;
   return <div className="settingsPage">
@@ -897,6 +940,14 @@ function Settings({ community, connections, openaiConnected, senlerConnected, bu
           <button className="primary wide" disabled={busy || aiValue.length < 20} onClick={() => onConnectOpenAI(aiValue.trim())}>{busy ? "Проверяю ключ…" : "Проверить и подключить →"}</button>
           <p className="securityNote">Вставьте API-ключ из кабинета router.cheap — без слова Bearer и без кавычек. Ключ хранится в базе только в зашифрованном виде и доступен после входа в ваш аккаунт.</p>
         </>}
+      </article>
+      <article className="card connectionCard">
+        <div className="stepLabel">РЕКЛАМНЫЙ КАБИНЕТ · ЭМАЛИС</div>
+        <h3>{vkAdsConnected ? "VK Ads подключён · ID 29867480" : "Подключить VK Ads кабинет"}</h3>
+        <p>По этому кабинету сверяются метки объявлений. Другие кабинеты не входят в итоговую сводку.</p>
+        <label className="tokenLabel">Токен VK Ads кабинета<input type="password" autoComplete="off" value={vkAdsValue} onChange={(e) => setVkAdsValue(e.target.value)} placeholder="Токен рекламного кабинета" /></label>
+        <button className="primary wide" disabled={busy || vkAdsValue.length < 10} onClick={() => { onConnectVkAds(vkAdsValue); setVkAdsValue(""); }}>{busy ? "Проверяю кабинет…" : vkAdsConnected ? "Обновить подключение →" : "Подключить кабинет →"}</button>
+        <p className="securityNote">Ключ хранится в Supabase Vault. В отчёт попадают только объявления, подтверждённые API кабинета 29867480.</p>
       </article>
       <article className="card connectionCard">
         <div className="stepLabel">ШАГ 3 · SENLER</div>
@@ -1014,7 +1065,7 @@ function AdsDashboard({ stats, dialogs, serverAds, serverDialogTotal, serverStat
     result[dialog.adId] = current;
     return result;
   }, {});
-  const ads = serverStatus === "ready" ? serverAds : Array.isArray(stats?.ads) && stats.ads.length ? stats.ads : Object.values(derivedAds).sort((a,b)=>b.dialogs-a.dialogs);
+  const ads = serverStatus === "ready" ? serverAds : serverStatus === "error" ? [] : Array.isArray(stats?.ads) && stats.ads.length ? stats.ads : Object.values(derivedAds).sort((a,b)=>b.dialogs-a.dialogs);
   const selectedAd = selectedAdId ? ads.find((ad)=>ad.adId===selectedAdId) : null;
 
   function sourceTitle(ad: AdStat) {
@@ -1090,7 +1141,7 @@ function AdsDashboard({ stats, dialogs, serverAds, serverDialogTotal, serverStat
 
   if (serverStatus === "loading" || serverStatus === "error" || serverStatus === "ready") return <div className="pageBlock adsPage">
     <div className="introRow"><div><p className="eyebrow">АТРИБУЦИЯ VK РЕКЛАМЫ · v3.1</p><h2>Какие источники привели обращения</h2><p>Нажмите на источник, чтобы открыть примеры диалогов и проверить классификацию.</p></div></div>
-    {serverStatus==="ready"&&<div className="adDataState">{cabinet?.connected?`Кабинет «Эмалис» подключён · ID ${cabinet.accountId}. Другие рекламные кабинеты к этому сервису пока не подключены.`:cabinet?.cachedMatches?`Названия ${cabinet.cachedMatches} источников восстановлены из сохранённых данных VK Ads. Остальные показаны по ID; обновление кабинета сейчас недоступно.`:"Для выбранного сообщества рекламный кабинет VK Ads не подключён."}</div>}
+    {serverStatus==="ready"&&<div className="adDataState">Кабинет «Эмалис» подтверждён через VK Ads API · ID {cabinet?.accountId}. В таблице только его источники.</div>}
     {serverStatus==="loading"&&<div className="adDataState">Загружаю статистику объявлений…</div>}
     {serverStatus==="error"&&<div className="adDataState error">Не удалось сверить источники: {serverError}. Сохранённые числа доступны ниже.</div>}
     {ads.length>0&&serverStatus!=="loading"&&<>

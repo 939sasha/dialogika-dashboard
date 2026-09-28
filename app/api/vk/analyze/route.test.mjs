@@ -34,6 +34,7 @@ test("не загружает историю и не вызывает ИИ дл�
     body: JSON.stringify({
       token: "vk-token",
       groupId: 109534321,
+      verifiedAdIds: ["179422256"],
       days: 30,
       offset: 0,
       knownRevisions: { "101": "55:" + now },
@@ -73,7 +74,7 @@ test("не анализирует переписку без рекламного
   const response = await POST(new Request("https://dashboard.test/api/vk/analyze", {
     method: "POST",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify({ token: "vk-token", openaiKey: "router-key", groupId: 109534321, days: 30 }),
+    body: JSON.stringify({ token: "vk-token", openaiKey: "router-key", groupId: 109534321, days: 30, verifiedAdIds: ["179422256"] }),
   }));
   assert.equal(response.status, 200);
   const data = await response.json();
@@ -100,7 +101,7 @@ test("включает рекламную рассылку в охват, но �
   };
   const response = await POST(new Request("https://dashboard.test/api/vk/analyze", {
     method: "POST", headers: { "content-type": "application/json" },
-    body: JSON.stringify({ token: "vk-token", openaiKey: "router-key", groupId: 109534321, days: 30 }),
+    body: JSON.stringify({ token: "vk-token", openaiKey: "router-key", groupId: 109534321, days: 30, verifiedAdIds: ["179422256"] }),
   }));
   assert.equal(response.status, 200);
   const data = await response.json();
@@ -116,7 +117,7 @@ test("включает рекламную рассылку в охват, но �
   assert.equal(calls.length, 2);
 });
 
-test("сохраняет явную текстовую метку рекламы как отдельный источник без ID объявления", async () => {
+test("исключает текстовую метку, отсутствующую в проверенном кабинете", async () => {
   const now = Math.floor(Date.now() / 1000);
   const outbound = { id: 88, date: now, from_id: -109534321, peer_id: 101, out: 1,
     text: "Анонс", ref: "feed_top", ref_source: "vk_ads" };
@@ -130,12 +131,11 @@ test("сохраняет явную текстовую метку рекламы
   };
   const response = await POST(new Request("https://dashboard.test/api/vk/analyze", {
     method: "POST", headers: { "content-type": "application/json" },
-    body: JSON.stringify({ token: "vk-token", openaiKey: "router-key", groupId: 109534321, days: 30 }),
+    body: JSON.stringify({ token: "vk-token", openaiKey: "router-key", groupId: 109534321, days: 30, verifiedAdIds: ["179422256"] }),
   }));
   assert.equal(response.status, 200);
   const data = await response.json();
-  assert.equal(data.changedDialogs, 1);
-  assert.equal(data.dialogs[0].adId, "vk_ads:feed_top");
-  assert.equal(data.dialogs[0].status, "Нет ответа клиента");
+  assert.equal(data.changedDialogs, 0);
+  assert.deepEqual(data.dialogs, []);
   assert.equal(data.ai.analyzedCount, 0);
 });

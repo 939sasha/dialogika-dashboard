@@ -21,7 +21,7 @@ export async function GET(request: Request) {
   if (error) return Response.json({ error: error.message }, { status: 500 });
 
   const rows = (data || []) as Array<{
-    kind: "vk" | "router" | "senler";
+    kind: "vk" | "router" | "senler" | "vk_ads";
     external_id: string;
     name: string;
     photo: string | null;
@@ -38,6 +38,7 @@ export async function GET(request: Request) {
     latestAnalysis: row.latest_analysis,
   }));
   const router = rows.find((row) => row.kind === "router");
+  const vkAds = rows.find((row) => row.kind === "vk_ads" && row.external_id === "29867480");
   const senlerConnections = rows.filter((row) => row.kind === "senler").map((row) => ({
     communityId: Number(row.external_id),
     name: row.name,
@@ -55,6 +56,7 @@ export async function GET(request: Request) {
     routerKey: router?.credential || "",
     routerCredentialAvailable: Boolean(router?.credential_available),
     senlerConnections,
+    vkAdsConnected: Boolean(vkAds?.credential_available),
     credentialRecoveryNeeded,
   });
 }
@@ -64,20 +66,22 @@ export async function PUT(request: Request) {
   if (!auth) return Response.json({ error: "Требуется вход" }, { status: 401 });
 
   const body = await request.json().catch(() => null) as null | {
-    kind?: "vk" | "router" | "senler";
+    kind?: "vk" | "router" | "senler" | "vk_ads";
     externalId?: string;
     name?: string;
     photo?: string | null;
     credential?: string;
     latestAnalysis?: unknown;
   };
-  if (!body?.kind || !body.externalId) return Response.json({ error: "Некорректные данные" }, { status: 400 });
+  if (!body?.kind || !body.externalId || (body.kind === "vk_ads" && body.externalId !== "29867480")) {
+    return Response.json({ error: "Некорректные данные" }, { status: 400 });
+  }
 
   if (body.credential) {
     const { error } = await auth.client.rpc("dialogika_save_credential", {
       p_kind: body.kind,
       p_external_id: body.externalId,
-      p_name: body.name || (body.kind === "router" ? "Router Cheap" : body.kind === "senler" ? "Senler" : "Сообщество VK"),
+      p_name: body.name || (body.kind === "router" ? "Router Cheap" : body.kind === "senler" ? "Senler" : body.kind === "vk_ads" ? "VK Ads Эмалис" : "Сообщество VK"),
       p_photo: body.photo || "",
       p_credential: body.credential,
     });

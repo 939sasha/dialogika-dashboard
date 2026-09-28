@@ -1,4 +1,5 @@
 import { analyzeDialogsWithAi } from "../../../lib/openaiAnalysis";
+import { EMALIS_COMMUNITY_ID } from "../../../lib/vkAdsAccount";
 
 const VK_API = "https://api.vk.com/method";
 const VK_VERSION = "5.199";
@@ -250,7 +251,7 @@ function analyzeDialog(messages: VkMessage[]) {
 
 export async function POST(request: Request) {
   try {
-    const { token, openaiKey, senlerCredential, preferredModel, groupId, days = 30, offset = 0, knownRevisions = {} } = await request.json() as {
+    const { token, openaiKey, senlerCredential, preferredModel, groupId, days = 30, offset = 0, knownRevisions = {}, verifiedAdIds } = await request.json() as {
       token?: string;
       openaiKey?: string;
       senlerCredential?: string;
@@ -259,10 +260,13 @@ export async function POST(request: Request) {
       days?: number;
       offset?: number;
       knownRevisions?: Record<string, string>;
+      verifiedAdIds?: string[];
     };
-    if (!token || !groupId || ![30, 60, 90].includes(days) || offset < 0) {
+    if (!token || !groupId || ![30, 60, 90].includes(days) || offset < 0 ||
+        (String(groupId) === EMALIS_COMMUNITY_ID && (!Array.isArray(verifiedAdIds) || !verifiedAdIds.length))) {
       return Response.json({ error: "Некорректные параметры анализа" }, { status: 400 });
     }
+    const allowedAds = String(groupId) === EMALIS_COMMUNITY_ID ? new Set(verifiedAdIds) : null;
 
     const cutoff = Math.floor(Date.now() / 1000) - days * 86400;
     const conversations = await vkMethod("messages.getConversations", token, {
@@ -321,7 +325,7 @@ export async function POST(request: Request) {
 
     const senlerAds = await getSenlerAds(parseSenlerCredential(senlerCredential), attributedRows.map((row) => row.peerId));
     for (const row of attributedRows) if (!row.adId) row.adId = senlerAds.get(row.peerId) || null;
-    const rows = attributedRows.filter((row) => Boolean(row.adId));
+    const rows = attributedRows.filter((row) => Boolean(row.adId) && (!allowedAds || allowedAds.has(row.adId as string)));
     const conversationsToAnalyze = rows.filter((row) => row.hasClientMessage);
 
     const aiResult = conversationsToAnalyze.length

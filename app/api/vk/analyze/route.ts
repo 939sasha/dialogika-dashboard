@@ -427,6 +427,7 @@ export async function POST(request: Request) {
       pageDialogs: active.length,
       attribution,
       senlerRecentPeerIds: attributedRows.filter((row) => senlerCandidatePeerIds?.includes(row.peerId)).map((row) => row.peerId),
+      senlerClientRepliedPeerIds: attributedRows.filter((row) => row.hasClientMessage && senlerCandidatePeerIds?.includes(row.peerId)).map((row) => row.peerId),
       changedDialogs: rows.length,
       unchangedPeerIds,
       goalLabels: Object.fromEntries(Object.entries(GOALS).map(([key, value]) => [key, value.label])),

@@ -6,10 +6,10 @@ import { createClient, SupabaseClient, User } from "@supabase/supabase-js";
 type Period = "30" | "60" | "90";
 type Community = { id: number; name: string; photo: string | null };
 type StoredAnalysis = { stats: LiveStats; dialogs: LiveDialog[]; senlerConversations?: SenlerConversation[]; period: Period; accountId?: string; savedAt?: string; version?: 5 | 6 | 7 | 8 | 9 | 10 | 11 | 12 | 13 };
-type SenlerAttribution = { totalSubscriptions: number; withAdMarker: number; outsideAccount: number; withSenlerTagNoAdId: number; withoutMarker: number; accountAdSubscriptions: number; linkedToDialog: number; vkResultsTotal?: number; vkResultsError?: string | null; pageGroups?: Array<{ subscriptionId: string; adIds: string[]; events: number }>; pageCandidates?: number; pageConversations?: number; recentPageConversations?: number };
+type SenlerAttribution = { totalSubscriptions: number; withAdMarker: number; outsideAccount: number; withSenlerTagNoAdId: number; withoutMarker: number; accountAdSubscriptions: number; linkedToDialog: number; vkResultsTotal?: number; vkResultsError?: string | null; pageGroups?: Array<{ subscriptionId: string; adIds: string[]; events: number }>; pageCandidates?: number; pageConversations?: number; recentPageConversations?: number; clientRepliedPageConversations?: number };
 type SenlerEvent = { peerId: number | null; adId: string; date: string };
 type SenlerPageCandidate = { peerId: number; subscriptionId: string; date: string; source: string };
-type SenlerConversation = SenlerPageCandidate & { recent: boolean; adId?: string | null };
+type SenlerConversation = SenlerPageCandidate & { recent: boolean; clientReplied?: boolean; adId?: string | null };
 type Attribution = { recentConversations: number; historiesLoaded: number; withVkMarker: number; withSenlerMarker: number; matchedToAccount: number; taggedOutsideAccount: number; withoutMarker: number };
 const emptyAttribution = (): Attribution => ({ recentConversations: 0, historiesLoaded: 0, withVkMarker: 0, withSenlerMarker: 0, matchedToAccount: 0, taggedOutsideAccount: 0, withoutMarker: 0 });
 type AnalysisCheckpoint = {
@@ -19,6 +19,7 @@ type AnalysisCheckpoint = {
   aiFailureReason: string; aiUsage: { inputTokens: number; outputTokens: number; totalTokens: number; estimatedCostUsd: number };
   attribution?: Attribution;
   senlerRecentPeerIds?: number[];
+  senlerClientRepliedPeerIds?: number[];
 };
 type SavedCommunity = Community & { token: string; credentialAvailable?: boolean; latestAnalysis?: StoredAnalysis | LiveStats | null };
 type SavedSenlerConnection = { communityId: number; name: string; photo: string | null; key: string; credentialAvailable?: boolean };
@@ -466,7 +467,7 @@ export default function Home() {
     // Scan each recent VK conversation so the attribution audit has complete denominators.
     const knownRevisions = {};
     const incremental = false;
-    const checkpointKey = `dialogika-analysis-checkpoint-v6:${user?.id || ""}:${community.id}:${period}`;
+    const checkpointKey = `dialogika-analysis-checkpoint-v7:${user?.id || ""}:${community.id}:${period}`;
     let checkpoint: AnalysisCheckpoint | null = null;
     try {
       const saved = sessionStorage.getItem(checkpointKey);
@@ -509,7 +510,7 @@ export default function Home() {
           withoutMarker: result.withoutMarker || 0, accountAdSubscriptions: result.accountAdSubscriptions || 0, linkedToDialog: 0,
           vkResultsTotal: vkResults.reduce((sum, row) => sum + row.results, 0), vkResultsError: result.vkResultsError || null,
           pageGroups: result.pageGroups || [], pageCandidates: new Set(pageCandidates.map((event) => event.peerId)).size,
-          pageConversations: 0, recentPageConversations: 0 };
+          pageConversations: 0, recentPageConversations: 0, clientRepliedPageConversations: 0 };
         if (senlerEvents.length !== senler.accountAdSubscriptions) throw new Error("Сверка подписок и ID объявлений не сошлась. Предыдущий отчёт сохранён.");
         if (pageCandidates.length) {
           setNotice("Ищу переписки подписчиков Senler в сообщениях сообщества…");
@@ -548,6 +549,7 @@ export default function Home() {
       const aiUsage = checkpoint?.aiUsage || { inputTokens: 0, outputTokens: 0, totalTokens: 0, estimatedCostUsd: 0 };
       const attribution = checkpoint?.attribution || emptyAttribution();
       const senlerRecentPeerIds = new Set<number>(checkpoint?.senlerRecentPeerIds || []);
+      const senlerClientRepliedPeerIds = new Set<number>(checkpoint?.senlerClientRepliedPeerIds || []);
 
       const fetchPage = async (pageOffset: number, model: string) => {
         let response: Response | null = null;
@@ -596,6 +598,7 @@ export default function Home() {
           pageDialogs?: number;
           attribution?: Attribution;
           senlerRecentPeerIds?: number[];
+          senlerClientRepliedPeerIds?: number[];
           changedDialogs?: number;
           done?: boolean;
           nextOffset?: number;
@@ -634,6 +637,7 @@ export default function Home() {
           if (!result.attribution) throw new Error("Сервер не вернул сверку рекламных меток; отчёт не сохранён.");
           for (const key of Object.keys(attribution) as Array<keyof Attribution>) attribution[key] += result.attribution[key] || 0;
           for (const peerId of result.senlerRecentPeerIds || []) senlerRecentPeerIds.add(peerId);
+          for (const peerId of result.senlerClientRepliedPeerIds || []) senlerClientRepliedPeerIds.add(peerId);
 
           if (result.unchangedPeerIds?.length) throw new Error("Сервер пропустил переписки при полной сверке; отчёт не сохранён.");
 
@@ -674,6 +678,7 @@ export default function Home() {
             fallbackCount: newFallbackCount, aiFailureReason, aiUsage,
             attribution,
             senlerRecentPeerIds: [...senlerRecentPeerIds],
+            senlerClientRepliedPeerIds: [...senlerClientRepliedPeerIds],
           } satisfies AnalysisCheckpoint;
           sessionStorage.setItem(checkpointKey, JSON.stringify(nextCheckpoint));
           checkpoint = nextCheckpoint;
@@ -748,8 +753,10 @@ export default function Home() {
       if (senler) {
         const exactAdsByPeer = new Map(analyzedDialogs.map((dialog) => [dialog.peerId, dialog.adId]));
         pageConversations = pageConversations.map((item) => ({ ...item, recent: senlerRecentPeerIds.has(item.peerId),
+          clientReplied: senlerClientRepliedPeerIds.has(item.peerId),
           adId: exactAdsByPeer.get(item.peerId) || null }));
         senler.recentPageConversations = pageConversations.filter((item) => item.recent).length;
+        senler.clientRepliedPageConversations = pageConversations.filter((item) => item.clientReplied).length;
         const dialogPeers = new Set(analyzedDialogs.map((dialog) => dialog.peerId));
         senler.linkedToDialog = senlerEvents.filter((event) => event.peerId && dialogPeers.has(event.peerId)).length;
         for (const event of senlerEvents) {
@@ -952,7 +959,7 @@ export default function Home() {
               <p>В выбранном кабинете {sourceProfile.miniAppAds} объявлений ведут в VK Mini App. Результат «Подписаться на рассылку» может появиться без сообщения в сообщество, поэтому число подписок нельзя считать числом переписок.</p>
               {!sourceProfile.senlerConnected && !sourceProfile.dashboardSenlerConnected && <p>Senler для этого сообщества не подключён. Подписки без сообщений сейчас нельзя сверить по людям и объявлениям. <button onClick={() => setTab("Настройки")}>Подключить Senler →</button></p>}
               {liveStats?.senler && <p>Senler: {liveStats.senler.totalSubscriptions} событий подписки; у {liveStats.senler.accountAdSubscriptions} есть точный ID объявления выбранного кабинета. Из них {liveStats.senler.linkedToDialog} связаны с перепиской. Без метки источника — {liveStats.senler.withoutMarker}, с меткой Senler без ID объявления — {liveStats.senler.withSenlerTagNoAdId}, с ID другого кабинета — {liveStats.senler.outsideAccount}. {liveStats.senler.vkResultsError ? `Статистика результатов VK Ads недоступна: ${liveStats.senler.vkResultsError}.` : `VK Ads показывает ${liveStats.senler.vkResultsTotal || 0} результатов объявлений Mini App; они приведены отдельно и могут не совпадать с событиями Senler.`} Подписка без сообщений не считается диалогом и не оценивается ИИ.</p>}
-              {liveStats?.senler?.pageCandidates !== undefined && <p>На подписных страницах, указанных в объявлениях этого кабинета: {liveStats.senler.pageGroups?.reduce((sum, item) => sum + item.events, 0) || 0} событий, {liveStats.senler.pageCandidates} пользователей. Переписка с сообществом найдена у {liveStats.senler.pageConversations || 0}; у {liveStats.senler.recentPageConversations || 0} из них были сообщения за выбранный период. Совпадение подписной страницы подтверждает страницу, но без рекламной метки не определяет, какое объявление привело пользователя.</p>}
+              {liveStats?.senler?.pageCandidates !== undefined && <><p>На подписных страницах, указанных в объявлениях этого кабинета: {liveStats.senler.pageGroups?.reduce((sum, item) => sum + item.events, 0) || 0} событий, {liveStats.senler.pageCandidates} пользователей. Переписка с сообществом найдена у {liveStats.senler.pageConversations || 0}; у {liveStats.senler.recentPageConversations || 0} из них были сообщения за выбранный период, у {liveStats.senler.clientRepliedPageConversations ?? "—"} есть ответ клиента. Совпадение подписной страницы подтверждает страницу, но без рекламной метки не определяет, какое объявление привело пользователя.</p><p>{liveStats.senler.pageGroups?.map((group) => `Страница Senler #${group.subscriptionId}: ${group.events} подписок, ${group.adIds.length} объявлений кабинета`).join(" · ")}</p></>}
             </article> : null}
             {liveStats.attribution && <article className="card attributionCard">
               <b>Сверка рекламных меток за {period} дней</b>
@@ -1237,7 +1244,7 @@ function SenlerConversationList({ conversations, communityId, accessToken }: { c
     {!conversations.length && <p>Переписки таких подписчиков в VK не найдены.</p>}
     {!!conversations.length && <div className="adDialogList">{conversations.map((item) => <article className="adDialogCard" key={item.peerId}>
       <div className="adDialogMeta"><div><b>Диалог #{item.peerId}</b><small>Страница Senler #{item.subscriptionId} · подписка {item.date || "дата неизвестна"}</small></div></div>
-      <p>{item.adId ? `Метка объявления VK: ${item.adId}.` : "ID объявления в подписке и переписке не подтверждён."} {item.recent ? "В периоде есть сообщения." : "Последняя активность могла быть раньше выбранного периода."}</p>
+      <p>{item.adId ? `Метка объявления VK: ${item.adId}.` : "ID объявления в подписке и переписке не подтверждён."} {item.recent ? "В периоде есть сообщения." : "Последняя активность могла быть раньше выбранного периода."} {item.clientReplied === undefined ? "" : item.clientReplied ? "Клиент ответил." : "Ответа клиента за период нет."}</p>
       <button className="adDialogOpen" onClick={() => openConversation(item)}>Открыть переписку →</button>
     </article>)}</div>}
     {selected && <div className="adDialogOverlay" onMouseDown={(event) => { if (event.currentTarget === event.target) setSelected(null); }}>

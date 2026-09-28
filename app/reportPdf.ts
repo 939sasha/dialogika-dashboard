@@ -7,6 +7,7 @@ export type PdfReportData = {
   period: number;
   generatedAt: string;
   dialogs: number;
+  replies?: number;
   leads: number;
   contacts: number;
   targets: number;
@@ -173,8 +174,8 @@ export function buildReportDefinition(data: PdfReportData): TDocumentDefinitions
       { text: `Период анализа: ${data.period} дней`, style: "lead", margin: [0, 0, 0, 28] },
       {
         columns: [
-          kpi("ДИАЛОГИ", number(data.dialogs), "с активностью в периоде"),
-          kpi("ИНТЕРЕС К ПОСЕЩЕНИЮ", number(data.leads), `${pct(data.leads, data.dialogs)}% диалогов`),
+          kpi("С РЕКЛАМНОЙ МЕТКОЙ", number(data.dialogs), `${number(data.replies ?? data.dialogs)} с ответом клиента`),
+          kpi("ИНТЕРЕС К ПОСЕЩЕНИЮ", number(data.leads), `${pct(data.leads, data.replies ?? data.dialogs)}% ответивших`),
           kpi("ЗАПИСЬ ИЛИ ПОКУПКА", number(data.targets), `${pct(data.targets, data.leads)}% заинтересованных`),
         ],
         columnGap: 10,
@@ -243,7 +244,7 @@ export function buildReportDefinition(data: PdfReportData): TDocumentDefinitions
       // Page 3
       pageBreak(),
       title("Потери", "Где и почему обрываются диалоги", "Ниже показаны проверяемые поведенческие признаки. Они помогают приоритизировать контроль качества."),
-      ...problems.map(([label, value], index) => bar(label, value, Math.max(1, data.dialogs), [orange, purple, yellow, green][index])),
+      ...problems.map(([label, value], index) => bar(label, value, Math.max(1, data.replies ?? data.dialogs), [orange, purple, yellow, green][index])),
       { text: "Таблица причин и действий", style: "sectionTitle" },
       {
         table: {
@@ -265,8 +266,8 @@ export function buildReportDefinition(data: PdfReportData): TDocumentDefinitions
           headerRows: 1,
           widths: ["*", 65, 85],
           body: [
-            [{ text: "Возражение", style: "th" }, { text: "Диалоги", style: "th" }, { text: "Доля от всех", style: "th" }],
-            ...data.objections.slice(0, 6).map((item) => [item.label, number(item.count), `${pct(item.count, data.dialogs)}%`]),
+            [{ text: "Возражение", style: "th" }, { text: "Диалоги", style: "th" }, { text: "Доля от ответивших", style: "th" }],
+            ...data.objections.slice(0, 6).map((item) => [item.label, number(item.count), `${pct(item.count, data.replies ?? data.dialogs)}%`]),
           ],
         },
         layout: {

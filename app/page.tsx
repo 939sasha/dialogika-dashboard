@@ -762,10 +762,10 @@ export default function Home() {
               </article>
 
               <article className="card lossCard">
-                <p className="eyebrow">НАДЁЖНОСТЬ ОТЧЁТА</p><div className="lossNumber">{pct(liveStats.ai.analyzedCount ?? 0, liveStats.dialogs)}%</div>
-                <h3>диалогов разобрала нейросеть</h3>
-                <p>Остальные {liveStats.ai.fallbackCount ?? 0} оценены по формальным признакам. Их выводы нужно проверять вручную.</p>
-                <div className="estimate"><span>Нейросеть</span><b>{liveStats.ai.analyzedCount ?? 0} из {liveStats.dialogs}</b></div>
+                <p className="eyebrow">НАДЁЖНОСТЬ ОТЧЁТА</p><div className="lossNumber">{pct(liveStats.ai.analyzedCount ?? 0, liveStats.replies ?? liveStats.dialogs)}%</div>
+                <h3>ответов клиентов разобрала нейросеть</h3>
+                <p>Остальные {liveStats.ai.fallbackCount ?? 0} переписок с ответом оценены по формальным признакам. Без ответа клиента: {liveStats.dialogs - (liveStats.replies ?? liveStats.dialogs)} — они учтены в охвате без смысловой оценки.</p>
+                <div className="estimate"><span>Нейросеть</span><b>{liveStats.ai.analyzedCount ?? 0} из {liveStats.replies ?? liveStats.dialogs}</b></div>
                 <small>Числа в отчёте показывают признаки из переписки, а не подтверждённые продажи в кассе.</small>
               </article>
             </div>
@@ -791,10 +791,10 @@ export default function Home() {
 
             <div className="sectionHead"><div><p className="eyebrow">ГЛАВНЫЕ ПРОБЛЕМЫ</p><h2>Что именно требует исправления</h2></div></div>
             <div className="problemGrid liveProblems">
-              <ProblemCard number="01" color="#ff6b4a" title="Долгий ответ" count={liveStats.slowResponse} total={liveStats.dialogs} text="Хотя бы один ответ менеджера занял больше 15 минут." />
-              <ProblemCard number="02" color="#775cff" title="Нет следующего шага" count={liveStats.noNextStep} total={liveStats.dialogs} text="Коммерческий интерес есть, но диалог не доведён до найденной цели." />
-              <ProblemCard number="03" color="#f5b82e" title="Последнее слово за клиентом" count={liveStats.unanswered} total={liveStats.dialogs} text="Последнее сообщение написал клиент, после него ответа сообщества не было." />
-              <ProblemCard number="04" color="#40b78a" title="Потеря с высоким риском" count={liveStats.lost} total={liveStats.dialogs} text="Совпали интерес, отсутствие целевого действия и незакрытый вопрос клиента." />
+              <ProblemCard number="01" color="#ff6b4a" title="Долгий ответ" count={liveStats.slowResponse} total={liveStats.replies ?? liveStats.dialogs} text="Хотя бы один ответ менеджера занял больше 15 минут." />
+              <ProblemCard number="02" color="#775cff" title="Нет следующего шага" count={liveStats.noNextStep} total={liveStats.replies ?? liveStats.dialogs} text="Коммерческий интерес есть, но диалог не доведён до найденной цели." />
+              <ProblemCard number="03" color="#f5b82e" title="Последнее слово за клиентом" count={liveStats.unanswered} total={liveStats.replies ?? liveStats.dialogs} text="Последнее сообщение написал клиент, после него ответа сообщества не было." />
+              <ProblemCard number="04" color="#40b78a" title="Потеря с высоким риском" count={liveStats.lost} total={liveStats.replies ?? liveStats.dialogs} text="Совпали интерес, отсутствие целевого действия и незакрытый вопрос клиента." />
             </div>
           </>}
         </>}
@@ -939,7 +939,7 @@ function LossChart({ stats }: { stats: LiveStats }) {
     { label: "Нет ответа клиенту", value: stats.unanswered, color: "#f5b82e" },
   ];
   const max = Math.max(1, ...values.map((item) => item.value));
-  return <article className="card chartCard"><div className="chartTitle"><div><span>ТЕКУЩИЕ ПОТЕРИ</span><h3>Причины риска</h3></div><b>{stats.lost}</b></div><div className="barChart">{values.map((item) => <div className="barItem" key={item.label}><div><span>{item.label}</span><b>{item.value} · {pct(item.value, stats.dialogs)}%</b></div><div><i style={{ width: `${item.value / max * 100}%`, background: item.color }} /></div></div>)}</div><p>Один диалог может попадать сразу в несколько категорий, поэтому проценты не складываются в 100%.</p></article>;
+  return <article className="card chartCard"><div className="chartTitle"><div><span>ТЕКУЩИЕ ПОТЕРИ</span><h3>Причины риска</h3></div><b>{stats.lost}</b></div><div className="barChart">{values.map((item) => <div className="barItem" key={item.label}><div><span>{item.label}</span><b>{item.value} · {pct(item.value, stats.replies ?? stats.dialogs)}%</b></div><div><i style={{ width: `${item.value / max * 100}%`, background: item.color }} /></div></div>)}</div><p>Доли рассчитаны от переписок с ответом клиента. Один диалог может попадать сразу в несколько категорий.</p></article>;
 }
 
 function OptimizationChart({ stats }: { stats: LiveStats }) {
@@ -1079,7 +1079,7 @@ function AdsDashboard({ stats, dialogs, serverAds, serverDialogTotal, serverStat
       {detailStatus==="error" && <div className="adDialogLoading error">{detailError}</div>}
       {detailStatus==="ready" && !detailDialogs.length && <div className="adDialogLoading">Связанные диалоги не найдены.</div>}
       {detailStatus==="ready" && detailDialogs.length>0 && <><div className="adDialogCount">Показано {detailDialogs.length} из {detailTotal} связанных диалогов</div><div className="adDialogList">{detailDialogs.map((d)=><article className="adDialogCard" key={d.peerId}>
-        <div className="adDialogMeta"><div><b>Диалог #{d.peerId}</b><small>{d.status} · качество {d.score}/100</small></div><div className="adDialogFlags"><span className={d.purchase == null ? "unknown" : d.purchase ? "yes" : "no"}>Покупка по анализу: {d.purchase == null ? "нет данных" : d.purchase ? "да" : "нет"}</span><span className={d.phone == null ? "unknown" : d.phone ? "yes" : "no"}>Телефон по анализу: {d.phone == null ? "нет данных" : d.phone ? "да" : "нет"}</span></div></div>
+        <div className="adDialogMeta"><div><b>Диалог #{d.peerId}</b><small>{d.status}{d.status === "Нет ответа клиента" ? " · качество не оценивается" : ` · качество ${d.score}/100`}</small></div><div className="adDialogFlags"><span className={d.purchase == null ? "unknown" : d.purchase ? "yes" : "no"}>Покупка по анализу: {d.purchase == null ? "нет данных" : d.purchase ? "да" : "нет"}</span><span className={d.phone == null ? "unknown" : d.phone ? "yes" : "no"}>Телефон по анализу: {d.phone == null ? "нет данных" : d.phone ? "да" : "нет"}</span></div></div>
         {(d.goal||d.issue)&&<div className="adDialogConclusion"><b>Классификация:</b> {[d.goal,d.issue].filter(Boolean).join(" · ")}</div>}
         <button className="adDialogOpen" onClick={()=>openFullDialog(d.peerId)}>{expandedPeerId===d.peerId ? "Свернуть переписку" : "Показать переписку целиком →"}</button>
         {expandedPeerId===d.peerId ? <>{expandedStatus==="loading" && <div className="adDialogLoading">Загружаю переписку из VK…</div>}{expandedStatus==="error" && <div className="adEvidenceMissing">{expandedError}</div>}{expandedStatus==="ready" && <>{expandedTruncated && <div className="adEvidenceMissing">Показаны последние 1000 сообщений. Более ранние сообщения не загружены.</div>}{expandedMessages.length ? <div className="adMessageList">{expandedMessages.map((m,i)=><div className={m.role==="Менеджер"?"adMessage manager":"adMessage client"} key={i}><div><b>{m.role}</b><small>{m.date}</small></div><p>{m.text}</p></div>)}</div> : <div className="adEvidenceMissing">В VK нет доступных сообщений этой переписки.</div>}</>}</> : d.messages.length > 0 ? <div className="adMessageList">{d.messages.map((m,i)=><div className={m.role==="Менеджер"?"adMessage manager":"adMessage client"} key={i}><div><b>{m.role}</b><small>{m.date}</small></div><p>{m.text}</p></div>)}</div> : <div className="adEvidenceMissing">Фрагмент отсутствует в сохранённом отчёте. Откройте переписку, чтобы загрузить её из VK.</div>}

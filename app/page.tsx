@@ -58,6 +58,7 @@ export default function Home() {
   const [liveStats, setLiveStats] = useState<LiveStats | null>(null);
   const [liveDialogs, setLiveDialogs] = useState<LiveDialog[]>([]);
   const [busy, setBusy] = useState(false);
+  const [syncingAccounts, setSyncingAccounts] = useState(false);
   const [reportBusy, setReportBusy] = useState(false);
   const [progress, setProgress] = useState({ processed: 0, total: 0 });
   useEffect(() => {
@@ -318,6 +319,32 @@ export default function Home() {
     } catch {
       return null;
     }
+  }
+
+  async function syncMissingAdIds() {
+    const missing = adAccounts.filter((item) => !item.adDetailAvailable);
+    if (!missing.length || !accessToken) return;
+    setSyncingAccounts(true);
+    const failures: string[] = [];
+    let completed = 0;
+    for (const account of missing) {
+      setNotice(`Обновляю ID объявлений: ${completed + failures.length + 1} из ${missing.length} · ${account.name}`);
+      try {
+        const response = await fetch("/api/ads/sources", {
+          method: "POST", headers: { authorization: `Bearer ${accessToken}`, "content-type": "application/json" },
+          body: JSON.stringify({ projectId: account.projectId }),
+        });
+        const result = await response.json() as { error?: string; counts?: { ads?: number } };
+        if (!response.ok) throw new Error(result.error || "Синхронизация не удалась");
+        if (!result.counts?.ads) throw new Error("В кабинете не найдены отдельные объявления");
+        completed += 1;
+        setAdAccounts((current) => current.map((item) => item.projectId === account.projectId ? { ...item, adDetailAvailable: true } : item));
+      } catch (error) {
+        failures.push(`${account.name}: ${error instanceof Error ? error.message : "ошибка"}`);
+      }
+    }
+    setSyncingAccounts(false);
+    setNotice(`ID объявлений обновлены в ${completed} из ${missing.length} кабинетов.${failures.length ? ` Не удалось: ${failures.join("; ")}` : ""}`);
   }
 
   function newerAnalysis(server: SavedCommunity["latestAnalysis"], local: StoredAnalysis | null, accountId?: string | null, communityId?: number) {
@@ -876,7 +903,7 @@ export default function Home() {
         {tab === "Диалоги" && <DialogsTable query={query} setQuery={setQuery} filteredDialogs={filteredDialogs} analyzed={Boolean(liveStats)} />}
         {tab === "Качество" && <Quality stats={liveStats} />}
         {tab === "ИИ-бот" && <Bot goal={liveStats?.goal} />}
-        {tab === "Настройки" && <Settings community={community} connections={connections} openaiConnected={Boolean(openaiKey)} senlerConnected={Boolean(community && senlerConnections.some((item) => item.communityId === community.id && Boolean(item.key)))} adAccounts={adAccounts} adAccountId={community ? adAssignments[String(community.id)] || "" : ""} busy={busy} onConnect={connectCommunity} onSelect={selectCommunity} onConnectOpenAI={connectOpenAI} onConnectSenler={connectSenler} onConnectVkAds={connectVkAds} onDisconnectOpenAI={async () => { await deleteSetting("router", "default", accessToken); setOpenaiKey(""); setNotice("Router Cheap отключён. Ключ удалён из вашего аккаунта."); }} onDisconnectSenler={async () => { if (!community) return; await deleteSetting("senler", String(community.id), accessToken); setSenlerConnections((current) => current.filter((item) => item.communityId !== community.id)); setNotice("Senler отключён. Ключ удалён из вашего аккаунта."); }} onDisconnect={disconnectCommunity} />}
+        {tab === "Настройки" && <Settings community={community} connections={connections} openaiConnected={Boolean(openaiKey)} senlerConnected={Boolean(community && senlerConnections.some((item) => item.communityId === community.id && Boolean(item.key)))} adAccounts={adAccounts} adAccountId={community ? adAssignments[String(community.id)] || "" : ""} busy={busy || syncingAccounts} onConnect={connectCommunity} onSelect={selectCommunity} onConnectOpenAI={connectOpenAI} onConnectSenler={connectSenler} onConnectVkAds={connectVkAds} onSyncMissingAdIds={syncMissingAdIds} syncingAccounts={syncingAccounts} onDisconnectOpenAI={async () => { await deleteSetting("router", "default", accessToken); setOpenaiKey(""); setNotice("Router Cheap отключён. Ключ удалён из вашего аккаунта."); }} onDisconnectSenler={async () => { if (!community) return; await deleteSetting("senler", String(community.id), accessToken); setSenlerConnections((current) => current.filter((item) => item.communityId !== community.id)); setNotice("Senler отключён. Ключ удалён из вашего аккаунта."); }} onDisconnect={disconnectCommunity} />}
       </section>
     </main>
   );
@@ -930,7 +957,7 @@ function Login({ client }: { client: SupabaseClient | null }) {
   </section></main>;
 }
 
-function Settings({ community, connections, openaiConnected, senlerConnected, adAccounts, adAccountId, busy, onConnect, onSelect, onConnectOpenAI, onConnectSenler, onConnectVkAds, onDisconnectOpenAI, onDisconnectSenler, onDisconnect }: { community: Community | null; connections: SavedCommunity[]; openaiConnected: boolean; senlerConnected: boolean; adAccounts: DashboardAccount[]; adAccountId: string; busy: boolean; onConnect: (token: string) => void; onSelect: (community: SavedCommunity) => void; onConnectOpenAI: (key: string) => void; onConnectSenler: (key: string, groupId: string) => void; onConnectVkAds: (accountId: string) => void; onDisconnectOpenAI: () => void; onDisconnectSenler: () => void; onDisconnect: () => void }) {
+function Settings({ community, connections, openaiConnected, senlerConnected, adAccounts, adAccountId, busy, onConnect, onSelect, onConnectOpenAI, onConnectSenler, onConnectVkAds, onSyncMissingAdIds, syncingAccounts, onDisconnectOpenAI, onDisconnectSenler, onDisconnect }: { community: Community | null; connections: SavedCommunity[]; openaiConnected: boolean; senlerConnected: boolean; adAccounts: DashboardAccount[]; adAccountId: string; busy: boolean; onConnect: (token: string) => void; onSelect: (community: SavedCommunity) => void; onConnectOpenAI: (key: string) => void; onConnectSenler: (key: string, groupId: string) => void; onConnectVkAds: (accountId: string) => void; onSyncMissingAdIds: () => void; syncingAccounts: boolean; onDisconnectOpenAI: () => void; onDisconnectSenler: () => void; onDisconnect: () => void }) {
   const [value, setValue] = useState("");
   const [aiValue, setAiValue] = useState("");
   const [senlerValue, setSenlerValue] = useState("");
@@ -983,6 +1010,7 @@ function Settings({ community, connections, openaiConnected, senlerConnected, ad
         </select></label>
         <button className="primary wide" disabled={busy || !community || vkAdsValue === adAccountId} onClick={() => onConnectVkAds(vkAdsValue)}>{busy ? "Сохраняю выбор…" : vkAdsValue === adAccountId && community ? "Выбор сохранён ✓" : "Сохранить выбор →"}</button>
         <p className="securityNote">Все кабинеты берутся из вашего дашборда. Если там пока сохранены только группы, метки отдельных объявлений появятся в сверке после синхронизации их ID.</p>
+        {adAccounts.some((item) => !item.adDetailAvailable) && <button className="primary wide" disabled={busy} onClick={onSyncMissingAdIds}>{syncingAccounts ? "Обновляю ID объявлений…" : "Обновить ID объявлений всех кабинетов →"}</button>}
       </article>
       <article className="card connectionCard">
         <div className="stepLabel">ШАГ 3 · SENLER</div>

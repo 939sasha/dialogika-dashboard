@@ -34,12 +34,14 @@ export async function GET(request: Request) {
 export async function POST(request: Request) {
   try {
     const { client, token, user } = await authorizedClient(request);
-    const { communityId } = await request.json() as { communityId?: string };
-    if (!communityId || !/^\d+$/.test(communityId)) return Response.json({ error: "Укажите сообщество" }, { status: 400 });
-    const accountId = await assignedAccount(client, user.id, communityId);
-    if (!accountId) return Response.json({ error: "Сначала выберите рекламный кабинет" }, { status: 400 });
-    const { data: project, error } = await client.from("projects").select("id")
-      .eq("user_id", user.id).eq("connection_type", "api").eq("vk_account_id", accountId).maybeSingle();
+    const { communityId, projectId } = await request.json() as { communityId?: string; projectId?: string };
+    if (!projectId && (!communityId || !/^\d+$/.test(communityId))) return Response.json({ error: "Укажите сообщество или кабинет" }, { status: 400 });
+    const accountId = projectId ? null : await assignedAccount(client, user.id, communityId!);
+    if (!projectId && !accountId) return Response.json({ error: "Сначала выберите рекламный кабинет" }, { status: 400 });
+    let projects = client.from("projects").select("id, vk_account_id")
+      .eq("user_id", user.id).eq("connection_type", "api");
+    projects = projectId ? projects.eq("id", projectId) : projects.eq("vk_account_id", accountId!);
+    const { data: project, error } = await projects.maybeSingle();
     if (error || !project) return Response.json({ error: "Выбранный кабинет не найден" }, { status: 404 });
     const response = await fetch(dashboardSyncUrl, {
       method: "POST",
@@ -50,7 +52,7 @@ export async function POST(request: Request) {
     });
     const result = await response.json().catch(() => ({})) as { error?: string; counts?: unknown };
     if (!response.ok) return Response.json({ error: result.error || "Не удалось обновить объявления кабинета" }, { status: 502 });
-    return Response.json({ ok: true, counts: result.counts });
+    return Response.json({ ok: true, projectId: project.id, accountId: project.vk_account_id, counts: result.counts });
   } catch (error) {
     const message = error instanceof Error ? error.message : "VK Ads недоступен";
     return Response.json({ error: message }, { status: message === "Требуется вход" ? 401 : 503 });

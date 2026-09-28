@@ -5,7 +5,7 @@ import { createClient, SupabaseClient, User } from "@supabase/supabase-js";
 
 type Period = "30" | "60" | "90";
 type Community = { id: number; name: string; photo: string | null };
-type StoredAnalysis = { stats: LiveStats; dialogs: LiveDialog[]; period: Period; savedAt?: string; version?: 5 | 6 };
+type StoredAnalysis = { stats: LiveStats; dialogs: LiveDialog[]; period: Period; savedAt?: string; version?: 5 | 6 | 7 };
 type AnalysisCheckpoint = {
   version: 1; savedAt: number; offset: number; totalAvailable: number | null; dialogs: LiveDialog[];
   reusedPeerIds: number[]; changedPeerIds: number[]; scannedCount: number; preferredModel: string;
@@ -16,11 +16,11 @@ type SavedCommunity = Community & { token: string; credentialAvailable?: boolean
 type SavedSenlerConnection = { communityId: number; name: string; photo: string | null; key: string; credentialAvailable?: boolean };
 type DialogMetrics = { hasPhone: boolean; hasInterest: boolean; responseSum: number; responseCount: number; slowResponse: boolean; noNextStep: boolean; unanswered: boolean; firstEverDate: number | null; objectionKeys: string[] };
 type EvidenceMessage = { role: "Клиент" | "Менеджер"; text: string; date: string };
-type LiveDialog = { peerId: number; adId?: string | null; score: number; status: string; issue: string; intent?: string; goal?: string; goalReached?: boolean; purchase?: boolean; nuance?: string; recommendation?: string; betterReply?: string; confidence?: number; objections?: string[]; revision?: string; lastMessageId?: number; lastMessageDate?: number; metrics?: DialogMetrics; aiAnalyzed?: boolean; aiModel?: string; evidence?: EvidenceMessage[] };
-type AdStat = { adId: string; dialogs: number; leads: number; targets: number; purchases?: number | null; phones?: number | null; lost: number; scoreSum: number; matched?: boolean; lookupUnavailable?: boolean; lookupReason?: string; matchType?: "banner" | "group" | "campaign"; adName?: string; groupId?: string; groupName?: string; campaignId?: string; campaignName?: string };
+type LiveDialog = { peerId: number; adId?: string | null; hasClientMessage?: boolean; score: number; status: string; issue: string; intent?: string; goal?: string; goalReached?: boolean; purchase?: boolean; nuance?: string; recommendation?: string; betterReply?: string; confidence?: number; objections?: string[]; revision?: string; lastMessageId?: number; lastMessageDate?: number; metrics?: DialogMetrics; aiAnalyzed?: boolean; aiModel?: string; evidence?: EvidenceMessage[] };
+type AdStat = { adId: string; dialogs: number; replies?: number; leads: number; targets: number; purchases?: number | null; phones?: number | null; lost: number; scoreSum: number; matched?: boolean; lookupUnavailable?: boolean; lookupReason?: string; matchType?: "banner" | "group" | "campaign"; adName?: string; groupId?: string; groupName?: string; campaignId?: string; campaignName?: string };
 type AdDialogDetail = { peerId: number; status: string; score: number; issue: string; goal?: string; purchase: boolean | null; phone: boolean | null; messages: EvidenceMessage[]; messagesUnavailable?: boolean };
 type LiveStats = {
-  dialogs: number; leads: number; contacts: number; targets: number; lost: number;
+  dialogs: number; replies?: number; leads: number; contacts: number; targets: number; lost: number;
   averageResponse: number; recoverableLow: number; recoverableHigh: number;
   goal: string; growth: number | null; slowResponse: number; noNextStep: number; unanswered: number;
   responseMeasured: boolean;
@@ -338,7 +338,7 @@ export default function Home() {
 
     const savedFromAccount = connections.find((item) => item.id === community.id)?.latestAnalysis;
     const previous = newerAnalysis(savedFromAccount, cachedAnalysis(community.id));
-    const reusable = previous && "stats" in previous && (previous.version === 5 || previous.version === 6) ? previous : null;
+    const reusable = previous && "stats" in previous && (previous.version === 5 || previous.version === 6 || previous.version === 7) ? previous : null;
     const reusableDialogs = new Map<number, LiveDialog>();
     for (const dialog of reusable?.dialogs || []) {
       if (dialog.revision && dialog.metrics && /^\d{5,}$/.test(dialog.adId || "")) reusableDialogs.set(dialog.peerId, dialog);
@@ -514,7 +514,7 @@ export default function Home() {
           : "Анализ продолжается: найдено " + dialogMap.size + " диалогов из " + (totalAvailable || "…") + "…");
       }
 
-      if (changedPeerIds.size > 0 && newAiAnalyzedCount === 0) {
+      if (newFallbackCount > 0 && newAiAnalyzedCount === 0) {
         throw new Error(`Router Cheap не обработал рекламные диалоги: ${aiFailureReason || "проверьте доступ к моделям"}. Предыдущий отчёт сохранён.`);
       }
 
@@ -522,7 +522,7 @@ export default function Home() {
         .filter((dialog) => Boolean(dialog.metrics && dialog.adId))
         .sort((a, b) => (b.lastMessageDate || 0) - (a.lastMessageDate || 0));
       const cutoff = Math.floor(Date.now() / 1000) - Number(period) * 86400;
-      const totals = { dialogs: analyzedDialogs.length, leads: 0, contacts: 0, targets: 0, lost: 0, responseSum: 0, responseCount: 0, slowResponse: 0, noNextStep: 0, unanswered: 0 };
+      const totals = { dialogs: analyzedDialogs.length, replies: 0, leads: 0, contacts: 0, targets: 0, lost: 0, responseSum: 0, responseCount: 0, slowResponse: 0, noNextStep: 0, unanswered: 0 };
       const objectionTotals: Record<string, number> = {};
       const dailyTotals: Record<string, number> = {};
       const adTotals: Record<string, AdStat> = {};
@@ -530,11 +530,13 @@ export default function Home() {
 
       for (const dialog of analyzedDialogs) {
         const metrics = dialog.metrics as DialogMetrics;
-        const lead = dialog.aiAnalyzed === false ? metrics.hasInterest : dialog.status !== "Не лид";
-        const target = dialog.goalReached ?? dialog.status === "Успешно";
-        const purchase = dialog.purchase ?? (Boolean(target) && /(покуп|оплат|билет|приобр)/i.test(`${dialog.goal || ""} ${dialog.issue || ""}`));
-        const lost = dialog.status === "Потерян";
+        const replied = dialog.hasClientMessage !== false;
+        const lead = replied && (dialog.aiAnalyzed === false ? metrics.hasInterest : dialog.status !== "Не лид");
+        const target = replied && (dialog.goalReached ?? dialog.status === "Успешно");
+        const purchase = replied && (dialog.purchase ?? (Boolean(target) && /(покуп|оплат|билет|приобр)/i.test(`${dialog.goal || ""} ${dialog.issue || ""}`)));
+        const lost = replied && dialog.status === "Потерян";
 
+        totals.replies += Number(replied);
         totals.leads += Number(lead);
         totals.contacts += Number(metrics.hasPhone);
         totals.targets += Number(target);
@@ -554,8 +556,9 @@ export default function Home() {
         }
 
         if (dialog.adId) {
-          const current = adTotals[dialog.adId] || { adId: dialog.adId, dialogs: 0, leads: 0, targets: 0, purchases: 0, phones: 0, lost: 0, scoreSum: 0 };
+          const current = adTotals[dialog.adId] || { adId: dialog.adId, dialogs: 0, replies: 0, leads: 0, targets: 0, purchases: 0, phones: 0, lost: 0, scoreSum: 0 };
           current.dialogs += 1;
+          current.replies = (current.replies || 0) + Number(replied);
           current.leads += Number(lead);
           current.targets += Number(target);
           current.purchases = (current.purchases || 0) + Number(purchase);
@@ -580,11 +583,12 @@ export default function Home() {
         if (!dialog.aiAnalyzed || !dialog.aiModel) continue;
         dialog.aiModel.split(",").map((model) => model.trim()).filter(Boolean).forEach((model) => aiModels.add(model));
       }
-      const totalAiAnalyzed = analyzedDialogs.filter((dialog) => dialog.aiAnalyzed !== false).length;
-      const totalFallback = analyzedDialogs.length - totalAiAnalyzed;
+      const totalAiAnalyzed = analyzedDialogs.filter((dialog) => dialog.hasClientMessage !== false && dialog.aiAnalyzed !== false).length;
+      const totalFallback = totals.replies - totalAiAnalyzed;
 
       const completedStats: LiveStats = {
         dialogs: totals.dialogs,
+        replies: totals.replies,
         leads: totals.leads,
         contacts: totals.contacts,
         targets: totals.targets,
@@ -630,7 +634,7 @@ export default function Home() {
         dialogs: analyzedDialogs,
         period,
         savedAt: new Date().toISOString(),
-        version: 6,
+        version: 7,
       };
       setConnections((current) => current.map((item) => item.id === community.id ? { ...item, latestAnalysis: storedAnalysis } : item));
       cacheAnalysis(community.id, storedAnalysis);
@@ -652,7 +656,7 @@ export default function Home() {
       } else if (incremental) {
         successMessage = "Готово: проверено " + totals.dialogs + " диалогов; " + reusedPeerIds.size + " использовано из кэша, " + changedPeerIds.size + " обновлено. В последнем запуске использовано " + aiUsage.totalTokens.toLocaleString("ru-RU") + " токенов.";
       } else {
-        successMessage = "Готово: ИИ обработал " + totalAiAnalyzed + " из " + totals.dialogs + " рекламных диалогов за " + period + " дней. Использовано " + aiUsage.totalTokens.toLocaleString("ru-RU") + " токенов.";
+        successMessage = "Готово: учтено " + totals.dialogs + " переписок с рекламной меткой; " + totals.replies + " с ответом клиента, " + totalAiAnalyzed + " разобрано ИИ. Использовано " + aiUsage.totalTokens.toLocaleString("ru-RU") + " токенов.";
       }
       if (newFallbackCount > 0) {
         successMessage += " Для " + newFallbackCount + " изменённых диалогов применены формальные признаки; эти выводы требуют проверки.";
@@ -737,9 +741,9 @@ export default function Home() {
 
           {data && liveStats && <>
             <div className="metrics">
-              <Metric label="Диалоги за период" value={data.dialogs.toLocaleString("ru-RU")} hint="переписки с сообщениями" description="Уникальные переписки, в которых было хотя бы одно сообщение за выбранный период." />
-              <Metric label="Интерес к посещению" value={data.leads.toLocaleString("ru-RU")} hint={`${pct(data.leads, data.dialogs)}% от диалогов`} description="Человек спрашивал о билетах, выставке, экскурсии, мастер-классе, цене или записи. Это ещё не покупка." />
-              <Metric label="Клиент оставил телефон" value={data.contacts.toLocaleString("ru-RU")} hint={`${pct(data.contacts, data.dialogs)}% от диалогов`} description="Телефон найден в сообщении клиента. Номер, написанный менеджером, не учитывается." />
+              <Metric label="С рекламной меткой" value={data.dialogs.toLocaleString("ru-RU")} hint={`${(liveStats.replies ?? data.dialogs).toLocaleString("ru-RU")} с ответом клиента`} description="Все переписки с рекламной меткой и сообщением за период; отдельная доля показывает ответ клиента." />
+              <Metric label="Интерес к посещению" value={data.leads.toLocaleString("ru-RU")} hint={`${pct(data.leads, liveStats.replies ?? data.dialogs)}% от ответивших`} description="Человек спрашивал о билетах, выставке, экскурсии, мастер-классе, цене или записи. Это ещё не покупка." />
+              <Metric label="Клиент оставил телефон" value={data.contacts.toLocaleString("ru-RU")} hint={`${pct(data.contacts, liveStats.replies ?? data.dialogs)}% от ответивших`} description="Телефон найден в сообщении клиента. Номер, написанный менеджером, не учитывается." />
               <Metric label="Запись или покупка" value={data.measurements.toLocaleString("ru-RU")} hint={`${pct(data.measurements, data.leads)}% от заинтересованных`} description="В переписке подтверждена запись, покупка билета или оплата. Один лишь вопрос о цене сюда не входит." />
               <Metric label="Среднее время ответа" value={data.response} danger={liveStats.responseMeasured && liveStats.averageResponse > 300} hint={liveStats.responseMeasured ? "между вопросом и ответом" : "в периоде нет пар вопрос–ответ"} description="Среднее время от первого входящего сообщения клиента до следующего ответа сообщества." />
             </div>
@@ -748,7 +752,8 @@ export default function Home() {
               <article className="card funnelCard">
                 <div className="cardHead"><div><p className="eyebrow">ЭТАПЫ ДИАЛОГА</p><h3>От обращения до записи или покупки</h3></div><span className="confidence">По переписке, без данных о расходах</span></div>
                 <div className="funnel">
-                  <FunnelRow label="Все диалоги за период" value={data.dialogs} max={data.dialogs} color="#231f20" />
+                  <FunnelRow label="С рекламной меткой" value={data.dialogs} max={data.dialogs} color="#231f20" />
+                  <FunnelRow label="Ответ клиента" value={liveStats.replies ?? data.dialogs} max={data.dialogs} color="#4a72d4" />
                   <FunnelRow label="Интерес к посещению" value={data.leads} max={data.dialogs} color="#775cff" />
                   <FunnelRow label="Клиент оставил телефон" value={data.contacts} max={data.dialogs} color="#a493ff" />
                   <FunnelRow label="Запись или покупка подтверждена" value={data.measurements} max={data.dialogs} color="#40b78a" />
@@ -997,14 +1002,15 @@ function AdsDashboard({ stats, dialogs, serverAds, serverDialogTotal, serverStat
   const purchaseOf = (dialog: LiveDialog) => dialog.purchase ?? (Boolean(dialog.goalReached ?? dialog.status === "Успешно") && /(покуп|оплат|билет|приобр)/i.test(`${dialog.goal || ""} ${dialog.issue || ""}`));
   const derivedAds = dialogs.reduce<Record<string, AdStat>>((result, dialog) => {
     if (!dialog.adId) return result;
-    const current = result[dialog.adId] || { adId: dialog.adId, dialogs: 0, leads: 0, targets: 0, purchases: 0, phones: 0, lost: 0, scoreSum: 0 };
+    const current = result[dialog.adId] || { adId: dialog.adId, dialogs: 0, replies: 0, leads: 0, targets: 0, purchases: 0, phones: 0, lost: 0, scoreSum: 0 };
     current.dialogs += 1;
-    current.leads += Number(dialog.status !== "Не лид");
+    current.replies = (current.replies || 0) + Number(dialog.hasClientMessage !== false);
+    current.leads += Number(dialog.hasClientMessage !== false && dialog.status !== "Не лид");
     current.targets += Number(dialog.goalReached ?? dialog.status === "Успешно");
     current.purchases = (current.purchases || 0) + Number(purchaseOf(dialog));
     current.phones = (current.phones || 0) + Number(Boolean(dialog.metrics?.hasPhone));
     current.lost += Number(dialog.status === "Потерян");
-    current.scoreSum += dialog.score || 0;
+    current.scoreSum += dialog.hasClientMessage === false ? 0 : dialog.score || 0;
     result[dialog.adId] = current;
     return result;
   }, {});
@@ -1087,10 +1093,10 @@ function AdsDashboard({ stats, dialogs, serverAds, serverDialogTotal, serverStat
     {serverStatus==="loading"&&<div className="adDataState">Загружаю статистику объявлений…</div>}
     {serverStatus==="error"&&<div className="adDataState error">Не удалось сверить источники: {serverError}. Сохранённые числа доступны ниже.</div>}
     {ads.length>0&&serverStatus!=="loading"&&<>
-      <div className="adDataState success">Загружено: {ads.length} рекламных меток · {ads.reduce((s,a)=>s+a.dialogs,0)} рекламных диалогов из {serverDialogTotal||stats?.dialogs||dialogs.length}</div>
-      <p className="adDefinitions">Покупка — отдельно подтверждённая покупка/оплата. Телефон — клиент оставил номер в переписке. «—» означает, что старый отчёт ещё не содержал этот признак. Нажмите на источник, чтобы увидеть фрагменты диалогов.</p>
-      <div className="simpleAdsTable"><table><thead><tr><th>Источник / объявление VK</th><th>Диалоги</th><th>Интерес</th><th>Запись / покупка</th><th>Покупка</th><th>Телефон</th><th>Потеряны</th><th>Качество</th></tr></thead><tbody>
-      {ads.map((ad)=>{const q=ad.dialogs?Math.round(ad.scoreSum/ad.dialogs):0;return <tr key={ad.adId}><td className="adIdentity"><button className="adIdentityButton" onClick={()=>openAdDialogs(ad.adId)}><b>{sourceTitle(ad)}</b><small>{ad.matched?(ad.matchType==="campaign"?`ID кампании: ${ad.adId}`:ad.matchType==="group"?`ID группы: ${ad.adId}`:`ID объявления: ${ad.adId}${ad.groupId?` · группа ${ad.groupName || ad.groupId}`:""}${ad.campaignId?` · кампания ${ad.campaignName || ad.campaignId}`:""}`):(ad.lookupUnavailable?ad.lookupReason||"Кабинет VK Ads не ответил":"ID не найден в подключённом кабинете «Эмалис».")}</small><em>Открыть диалоги →</em></button></td><td>{ad.dialogs}</td><td>{ad.leads} · {pct(ad.leads,ad.dialogs)}%</td><td>{ad.targets} · {pct(ad.targets,ad.dialogs)}%</td><td>{ad.purchases == null ? "—" : `${ad.purchases} · ${pct(ad.purchases,ad.dialogs)}%`}</td><td>{ad.phones == null ? "—" : `${ad.phones} · ${pct(ad.phones,ad.dialogs)}%`}</td><td>{ad.lost} · {pct(ad.lost,ad.dialogs)}%</td><td><b>{q}/100</b></td></tr>})}
+      <div className="adDataState success">Загружено: {ads.length} рекламных меток · {ads.reduce((s,a)=>s+a.dialogs,0)} переписок с меткой · {ads.reduce((s,a)=>s+(a.replies ?? a.dialogs),0)} с ответом клиента</div>
+      <p className="adDefinitions">Все переписки с рекламной меткой включены. «Ответ клиента» отделяет реальные обращения от рассылок без отклика; ИИ оценивает содержание только после ответа. Покупка и телефон подтверждаются перепиской. Качество рассчитано по перепискам с ответом клиента.</p>
+      <div className="simpleAdsTable"><table><thead><tr><th>Источник / объявление VK</th><th>С меткой</th><th>Ответ клиента</th><th>Интерес</th><th>Запись / покупка</th><th>Покупка</th><th>Телефон</th><th>Потеряны</th><th>Качество</th></tr></thead><tbody>
+      {ads.map((ad)=>{const replied=ad.replies ?? ad.dialogs;const q=replied?Math.round(ad.scoreSum/replied):0;return <tr key={ad.adId}><td className="adIdentity"><button className="adIdentityButton" onClick={()=>openAdDialogs(ad.adId)}><b>{sourceTitle(ad)}</b><small>{ad.matched?(ad.matchType==="campaign"?`ID кампании: ${ad.adId}`:ad.matchType==="group"?`ID группы: ${ad.adId}`:`ID объявления: ${ad.adId}${ad.groupId?` · группа ${ad.groupName || ad.groupId}`:""}${ad.campaignId?` · кампания ${ad.campaignName || ad.campaignId}`:""}`):(ad.lookupUnavailable?ad.lookupReason||"Кабинет VK Ads не ответил":"ID не найден в подключённом кабинете «Эмалис».")}</small><em>Открыть диалоги →</em></button></td><td>{ad.dialogs}</td><td>{replied} · {pct(replied,ad.dialogs)}%</td><td>{ad.leads} · {pct(ad.leads,replied)}%</td><td>{ad.targets} · {pct(ad.targets,replied)}%</td><td>{ad.purchases == null ? "—" : `${ad.purchases} · ${pct(ad.purchases,replied)}%`}</td><td>{ad.phones == null ? "—" : `${ad.phones} · ${pct(ad.phones,replied)}%`}</td><td>{ad.lost} · {pct(ad.lost,replied)}%</td><td>{replied?<b>{q}/100</b>:"—"}</td></tr>})}
       </tbody></table></div>
     </>}
     {panel}
@@ -1106,9 +1112,9 @@ function AdsDashboard({ stats, dialogs, serverAds, serverDialogTotal, serverStat
 
 function Quality({ stats }: { stats: LiveStats | null }) {
   if (!stats) return <div className="pageBlock"><EmptyState title="Оценка ещё не рассчитана" text="Раздел заполнится фактическими данными после полного анализа." /></div>;
-  const speed = Math.max(0, 100 - pct(stats.slowResponse, stats.dialogs));
+  const speed = Math.max(0, 100 - pct(stats.slowResponse, stats.replies ?? stats.dialogs));
   const nextStep = Math.max(0, 100 - pct(stats.noNextStep, stats.leads));
-  const replies = Math.max(0, 100 - pct(stats.unanswered, stats.dialogs));
+  const replies = Math.max(0, 100 - pct(stats.unanswered, stats.replies ?? stats.dialogs));
   const total = Math.round((speed + nextStep + replies) / 3);
   return <div className="pageBlock"><div className="introRow"><div><h2>Качество обработки диалогов</h2><p>Расчёт основан на трёх проверяемых показателях. Тон и полнота ответов без смысловой ИИ-модели не оцениваются.</p></div></div><div className="qualityGrid"><div className="scoreCard"><span>Сводный индекс</span><b>{total}</b><small>из 100</small><div className="scoreRing">{total >= 80 ? "Хороший уровень" : "Нужно внимание"}</div></div><div className="card rubric">{[["Скорость ответа · доля без задержек свыше 15 минут", speed], ["Следующий шаг · доля целевых обращений без обрыва", nextStep], ["Ответ клиенту · доля диалогов без пропущенного последнего сообщения", replies]].map(([x, n]) => <FunnelRow key={x} label={String(x)} value={Number(n)} max={100} color={Number(n) > 80 ? "#40b78a" : Number(n) > 65 ? "#775cff" : "#ff6b4a"} />)}</div></div></div>;
 }

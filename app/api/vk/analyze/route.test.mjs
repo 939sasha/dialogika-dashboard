@@ -84,7 +84,7 @@ test("не анализирует переписку без рекламного
   assert.equal(calls.length, 2);
 });
 
-test("не считает рекламную рассылку без ответа клиента обращением", async () => {
+test("включает рекламную рассылку в охват, но не считает её обращением и не вызывает ИИ", async () => {
   const now = Math.floor(Date.now() / 1000);
   const outbound = { id: 77, date: now, from_id: -109534321, peer_id: 101, out: 1,
     text: "Купите билет на экскурсию", ref: "179422256", ref_source: "vk_ads" };
@@ -104,9 +104,15 @@ test("не считает рекламную рассылку без ответ�
   }));
   assert.equal(response.status, 200);
   const data = await response.json();
-  assert.equal(data.changedDialogs, 0);
+  assert.equal(data.changedDialogs, 1);
   assert.equal(data.ai.analyzedCount, 0);
-  assert.deepEqual(data.dialogs, []);
+  assert.equal(data.stats.dialogs, 1);
+  assert.equal(data.stats.leads, 0);
+  assert.equal(data.dialogs[0].adId, "179422256");
+  assert.equal(data.dialogs[0].hasClientMessage, false);
+  assert.equal(data.dialogs[0].status, "Нет ответа клиента");
+  assert.equal(data.dialogs[0].purchase, false);
+  assert.equal(data.dialogs[0].metrics.hasPhone, false);
   assert.equal(calls.length, 2);
 });
 

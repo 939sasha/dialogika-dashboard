@@ -317,10 +317,11 @@ export async function POST(request: Request) {
 
     const senlerAds = await getSenlerAds(parseSenlerCredential(senlerCredential), attributedRows.map((row) => row.peerId));
     for (const row of attributedRows) if (!row.adId) row.adId = senlerAds.get(row.peerId) || null;
-    const rows = attributedRows.filter((row) => Boolean(row.adId) && row.hasClientMessage);
+    const rows = attributedRows.filter((row) => Boolean(row.adId));
+    const conversationsToAnalyze = rows.filter((row) => row.hasClientMessage);
 
-    const aiResult = rows.length
-      ? await analyzeDialogsWithAi(rows.map((row) => ({
+    const aiResult = conversationsToAnalyze.length
+      ? await analyzeDialogsWithAi(conversationsToAnalyze.map((row) => ({
           peerId: row.peerId,
           transcript: row.transcript,
           averageResponse: row.averageResponse,
@@ -344,10 +345,10 @@ export async function POST(request: Request) {
       const current = ads.get(row.adId) || { adId: row.adId, dialogs: 0, leads: 0, targets: 0, lost: 0, scoreSum: 0 };
       const aiDialog = aiByPeer.get(row.peerId);
       current.dialogs += 1;
-      current.leads += Number(aiDialog ? aiDialog.status !== "Не лид" : row.hasInterest);
-      current.targets += Number(aiDialog ? aiDialog.goalReached : row.hasGoal);
-      current.lost += Number(aiDialog ? aiDialog.status === "Потерян" : row.lost);
-      current.scoreSum += aiDialog?.score ?? row.score;
+      current.leads += Number(row.hasClientMessage && (aiDialog ? aiDialog.status !== "Не лид" : row.hasInterest));
+      current.targets += Number(row.hasClientMessage && (aiDialog ? aiDialog.goalReached : row.hasGoal));
+      current.lost += Number(row.hasClientMessage && (aiDialog ? aiDialog.status === "Потерян" : row.lost));
+      current.scoreSum += row.hasClientMessage ? (aiDialog?.score ?? row.score) : 0;
       ads.set(row.adId, current);
     }
 
@@ -357,7 +358,7 @@ export async function POST(request: Request) {
     }, {});
     const goalCounts = Object.fromEntries(Object.keys(GOALS).map((key) => [
       key,
-      rows.reduce((sum, row) => sum + row.goalCounts[key as GoalKey], 0),
+      conversationsToAnalyze.reduce((sum, row) => sum + row.goalCounts[key as GoalKey], 0),
     ])) as Record<GoalKey, number>;
     const objectionCounts = Object.fromEntries(Object.keys(OBJECTIONS).map((key) => [
       key,
@@ -370,9 +371,9 @@ export async function POST(request: Request) {
       }
       return acc;
     }, {});
-    const leads = rows.filter((row) => aiByPeer.get(row.peerId)?.status !== "Не лид" && (aiByPeer.has(row.peerId) || row.hasInterest)).length;
-    const targets = rows.filter((row) => aiByPeer.get(row.peerId)?.goalReached ?? row.hasGoal).length;
-    const lost = rows.filter((row) => aiByPeer.get(row.peerId)?.status === "Потерян" || (!aiByPeer.has(row.peerId) && row.lost)).length;
+    const leads = conversationsToAnalyze.filter((row) => aiByPeer.get(row.peerId)?.status !== "Не лид" && (aiByPeer.has(row.peerId) || row.hasInterest)).length;
+    const targets = conversationsToAnalyze.filter((row) => aiByPeer.get(row.peerId)?.goalReached ?? row.hasGoal).length;
+    const lost = conversationsToAnalyze.filter((row) => aiByPeer.get(row.peerId)?.status === "Потерян" || (!aiByPeer.has(row.peerId) && row.lost)).length;
 
     return Response.json({
       done: reachedCutoff || items.length < BATCH_SIZE || offset + items.length >= (conversations.count || 0),
@@ -410,37 +411,38 @@ export async function POST(request: Request) {
         recommendations: aiResult.dialogs.map((dialog) => dialog.recommendation).filter(Boolean),
       },
       problems: {
-        slowResponse: rows.filter((row) => row.slow).length,
-        noNextStep: rows.filter((row) => row.poorNextStep).length,
-        unanswered: rows.filter((row) => row.unanswered).length,
+        slowResponse: conversationsToAnalyze.filter((row) => row.slow).length,
+        noNextStep: conversationsToAnalyze.filter((row) => row.poorNextStep).length,
+        unanswered: conversationsToAnalyze.filter((row) => row.unanswered).length,
       },
       dialogs: rows.map((row) => {
         const ai = aiByPeer.get(row.peerId);
         return {
           peerId: row.peerId,
           adId: row.adId,
+          hasClientMessage: row.hasClientMessage,
           revision: row.revision,
           lastMessageId: row.lastMessageId,
           lastMessageDate: row.lastMessageDate,
           evidence: row.evidence,
-          goalReached: ai?.goalReached ?? row.hasGoal,
-          purchase: row.purchaseConfirmed || Boolean(ai?.goalReached && /(покуп|оплат|билет|приобр)/i.test(`${ai.goal || ""} ${ai.issue || ""}`)),
+          goalReached: row.hasClientMessage && (ai?.goalReached ?? row.hasGoal),
+          purchase: row.hasClientMessage && (row.purchaseConfirmed || Boolean(ai?.goalReached && /(покуп|оплат|билет|приобр)/i.test(`${ai.goal || ""} ${ai.issue || ""}`))),
           aiAnalyzed: Boolean(ai),
           aiModel: ai ? aiResult.model : "",
           metrics: {
-            hasPhone: row.hasPhone,
-            hasInterest: row.hasInterest,
+            hasPhone: row.hasClientMessage && row.hasPhone,
+            hasInterest: row.hasClientMessage && row.hasInterest,
             responseSum: row.responseSum,
             responseCount: row.responseCount,
-            slowResponse: row.slow,
-            noNextStep: row.poorNextStep,
-            unanswered: row.unanswered,
+            slowResponse: row.hasClientMessage && row.slow,
+            noNextStep: row.hasClientMessage && row.poorNextStep,
+            unanswered: row.hasClientMessage && row.unanswered,
             firstEverDate: row.firstEverDate,
-            objectionKeys: Object.entries(row.objectionCounts).filter(([, count]) => count > 0).map(([key]) => key),
+            objectionKeys: row.hasClientMessage ? Object.entries(row.objectionCounts).filter(([, count]) => count > 0).map(([key]) => key) : [],
           },
-          score: ai?.score ?? row.score,
-          status: ai?.status ?? (row.lost ? "Потерян" : row.hasGoal ? "Успешно" : "Риск"),
-          issue: ai?.issue ?? (row.slow ? "Долгий ответ" : row.unanswered ? "Нет ответа" : row.poorNextStep ? "Не предложен следующий шаг" : "Цель достигнута"),
+          score: row.hasClientMessage ? (ai?.score ?? row.score) : 0,
+          status: row.hasClientMessage ? (ai?.status ?? (row.lost ? "Потерян" : row.hasGoal ? "Успешно" : "Риск")) : "Нет ответа клиента",
+          issue: row.hasClientMessage ? (ai?.issue ?? (row.slow ? "Долгий ответ" : row.unanswered ? "Нет ответа" : row.poorNextStep ? "Не предложен следующий шаг" : "Цель достигнута")) : "По рекламной метке нет сообщения клиента",
           intent: ai?.intent || "",
           goal: ai?.goal || "",
           nuance: ai?.nuance || "",

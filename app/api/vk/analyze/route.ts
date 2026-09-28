@@ -35,6 +35,12 @@ type SenlerSubscriber = {
   utms?: Array<Record<string, unknown>>;
 };
 
+class TemporaryUpstreamError extends Error {}
+
+async function pauseBeforeRetry(attempt: number) {
+  await new Promise((resolve) => setTimeout(resolve, 700 * (attempt + 1)));
+}
+
 function sanitizeMessageText(value?: string) {
   return (value || "[вложение]")
     .replace(PHONE_GLOBAL_RE, "[ТЕЛЕФОН]")
@@ -89,22 +95,32 @@ function evidenceMessages(messages: VkMessage[]) {
 }
 
 async function vkMethod(method: string, token: string, params: Record<string, string>) {
-  for (let attempt = 0; attempt < 5; attempt++) {
+  for (let attempt = 0; attempt < 3; attempt++) {
     const body = new URLSearchParams({ ...params, access_token: token, v: VK_VERSION });
-    const response = await fetch(`${VK_API}/${method}`, {
-      method: "POST",
-      headers: { "content-type": "application/x-www-form-urlencoded" },
-      body,
-    });
-    const payload = await response.json() as { response?: unknown; error?: { error_code?: number; error_msg?: string } };
-    if ([6, 9].includes(payload.error?.error_code || 0) && attempt < 4) {
-      await new Promise((resolve) => setTimeout(resolve, 800 * (attempt + 1) * (attempt + 1)));
-      continue;
+    try {
+      const response = await fetch(`${VK_API}/${method}`, {
+        method: "POST",
+        headers: { "content-type": "application/x-www-form-urlencoded" },
+        body,
+        signal: AbortSignal.timeout(8_000),
+      });
+      if (response.status >= 500) throw new TemporaryUpstreamError(`VK API ${method}: HTTP ${response.status}`);
+      const payload = await response.json() as { response?: unknown; error?: { error_code?: number; error_msg?: string } };
+      if ([6, 9].includes(payload.error?.error_code || 0)) {
+        if (attempt < 2) { await pauseBeforeRetry(attempt); continue; }
+        throw new TemporaryUpstreamError(`VK API ${method} временно ограничил запросы`);
+      }
+      if (payload.error) throw new Error(payload.error.error_msg || "Ошибка API ВКонтакте");
+      return payload.response;
+    } catch (error) {
+      const transient = error instanceof TemporaryUpstreamError || error instanceof TypeError ||
+        (error instanceof Error && ["TimeoutError", "AbortError", "SyntaxError"].includes(error.name));
+      if (!transient) throw error;
+      if (attempt === 2) throw new TemporaryUpstreamError(`VK API ${method} временно недоступен. Пачка будет повторена.`);
+      await pauseBeforeRetry(attempt);
     }
-    if (payload.error) throw new Error(payload.error.error_msg || "Ошибка API ВКонтакте");
-    return payload.response;
   }
-  throw new Error("ВКонтакте временно ограничил частоту запросов");
+  throw new TemporaryUpstreamError(`VK API ${method} временно недоступен`);
 }
 
 async function getHistory(token: string, groupId: number, peerId: number, cutoff: number) {
@@ -175,18 +191,24 @@ function senlerAdId(item: SenlerSubscriber) {
 async function getSenlerAds(credential: SenlerCredential | null, peerIds: number[]) {
   const result = new Map<number, string>();
   if (!credential || !peerIds.length) return result;
-  const response = await fetch("https://senler.ru/api/subscribers/get", {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({
-      group_id: credential.groupId,
-      access_token: credential.accessToken,
-      v: 2,
-      count: 100,
-      vk_user_id: peerIds,
-    }),
-    signal: AbortSignal.timeout(12_000),
-  });
+  let response: Response;
+  try {
+    response = await fetch("https://senler.ru/api/subscribers/get", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        group_id: credential.groupId,
+        access_token: credential.accessToken,
+        v: 2,
+        count: 100,
+        vk_user_id: peerIds,
+      }),
+      signal: AbortSignal.timeout(10_000),
+    });
+  } catch {
+    throw new TemporaryUpstreamError("Senler временно недоступен. Пачка будет повторена.");
+  }
+  if (response.status >= 500) throw new TemporaryUpstreamError(`Senler: HTTP ${response.status}. Пачка будет повторена.`);
   const payload = await response.json().catch(() => null) as { success?: boolean; items?: SenlerSubscriber[] } | null;
   if (!response.ok || !payload?.success) return result;
   for (const item of payload.items || []) {
@@ -462,9 +484,10 @@ export async function POST(request: Request) {
     });
   } catch (error) {
     const timedOut = error instanceof Error && (error.name === "TimeoutError" || error.name === "AbortError" || /timeout|aborted/i.test(error.message));
+    const temporary = error instanceof TemporaryUpstreamError;
     return Response.json(
       { error: timedOut ? "Router Cheap отвечает слишком долго. Пачка будет запущена повторно автоматически." : error instanceof Error ? error.message : "Не удалось провести анализ" },
-      { status: timedOut ? 504 : 400 },
+      { status: timedOut ? 504 : temporary ? 503 : 400 },
     );
   }
 }

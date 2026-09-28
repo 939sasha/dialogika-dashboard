@@ -8,6 +8,33 @@ afterEach(() => {
   globalThis.fetch = originalFetch;
 });
 
+test("повторяет временный сетевой сбой VK и продолжает пачку", async () => {
+  let calls = 0;
+  globalThis.fetch = async () => {
+    calls += 1;
+    if (calls === 1) throw new TypeError("fetch failed");
+    return Response.json({ response: { count: 0, items: [] } });
+  };
+  const response = await POST(new Request("https://dashboard.test/api/vk/analyze", {
+    method: "POST", headers: { "content-type": "application/json" },
+    body: JSON.stringify({ token: "vk-token", groupId: 109534321, days: 30, offset: 39, verifiedAdIds: ["179422256"] }),
+  }));
+  assert.equal(response.status, 200);
+  assert.equal(calls, 2);
+});
+
+test("после повторных сетевых сбоев VK возвращает код для повторной попытки пачки", async () => {
+  let calls = 0;
+  globalThis.fetch = async () => { calls += 1; throw new TypeError("fetch failed"); };
+  const response = await POST(new Request("https://dashboard.test/api/vk/analyze", {
+    method: "POST", headers: { "content-type": "application/json" },
+    body: JSON.stringify({ token: "vk-token", groupId: 109534321, days: 30, offset: 39, verifiedAdIds: ["179422256"] }),
+  }));
+  assert.equal(response.status, 503);
+  assert.equal(calls, 3);
+  assert.match((await response.json()).error, /VK API messages.getConversations/);
+});
+
 test("не загружает историю и не вызывает ИИ для неизменившегося диалога", async () => {
   const now = Math.floor(Date.now() / 1000);
   const calls = [];

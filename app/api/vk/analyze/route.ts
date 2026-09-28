@@ -7,13 +7,13 @@ const VK_VERSION = "5.199";
 const BATCH_SIZE = 3;
 const PHONE_RE = /(?:\+?7|8)[\s\-()]?\d{3}[\s\-()]?\d{3}[\s\-]?\d{2}[\s\-]?\d{2}/;
 const PHONE_GLOBAL_RE = /(?:\+?7|8)[\s\-()]?\d{3}[\s\-()]?\d{3}[\s\-]?\d{2}[\s\-]?\d{2}/g;
-const INTEREST_RE = /(цен|стоим|сколько|билет|посет|запис|экскурс|выстав|мастер.?класс|расписан|места|оплат)\w*/i;
+const INTEREST_RE = /(цен|стоим|сколько|билет|посет|запис|экскурс|выстав|мастер.?класс|расписан|места|оплат|купить|заказ|проект|дом|площад|размер|комплект|доставк|срок|консультац|расч[её]т|смет)\w*/i;
 
 const GOALS = {
-  order: { label: "Запись на посещение", signal: /(запис\w*|билет\w*|экскурс\w*|мастер.?класс\w*)/i, success: /(запис\w*\s+(?:подтвержд|оформл)|вас\s+записали|билет\w*\s+(?:куплен|оформлен|приобретен))/i },
+  order: { label: "Подтверждённый заказ или запись", signal: /(запис\w*|заказ\w*|договор\w*|билет\w*|экскурс\w*|мастер.?класс\w*)/i, success: /((?:запис|заказ|договор)\w*\s+(?:подтвержд|оформл|заключ)|вас\s+записали|билет\w*\s+(?:куплен|оформлен|приобретен))/i },
   payment: { label: "Получение оплаты", signal: /(оплат\w*|чек|предоплат\w*|ссылк\w*\s+на\s+оплат)/i, success: /(оплатил\w*|оплата\s+(?:прошла|получена)|чек\s+об\s+оплате)/i },
 };
-const PURCHASE_SUCCESS_RE = /(билет\w*\s+(?:куплен|оформлен|приобретен)|оплатил\w*|оплата\s+(?:прошла|получена)|чек\s+об\s+оплате|покупк\w*\s+(?:оформлен|подтвержден|совершен))/i;
+const PURCHASE_SUCCESS_RE = /(билет\w*\s+(?:куплен|оформлен|приобретен)|оплатил\w*|оплата\s+(?:прошла|получена)|чек\s+об\s+оплате|покупк\w*\s+(?:оформлен|подтвержден|совершен)|заказ\w*\s+(?:оформлен|подтвержден)|договор\w*\s+заключен)/i;
 const OBJECTIONS = {
   price: { label: "Высокая цена", re: /(дорог\w*|слишком\s+дорог|цена\s+высок|дешевле|скидк\w*|бюджет\w*)/i },
   distance: { label: "Доставка и расстояние", re: /(далеко|доставк\w*|пересыл\w*|другой\s+город|не\s+доставляете|самовывоз)/i },
@@ -272,12 +272,13 @@ function analyzeDialog(messages: VkMessage[]) {
 
 export async function POST(request: Request) {
   try {
-    const { token, openaiKey, senlerCredential, preferredModel, groupId, days = 30, offset = 0, knownRevisions = {}, verifiedAdIds } = await request.json() as {
+    const { token, openaiKey, senlerCredential, preferredModel, groupId, communityName, days = 30, offset = 0, knownRevisions = {}, verifiedAdIds } = await request.json() as {
       token?: string;
       openaiKey?: string;
       senlerCredential?: string;
       preferredModel?: string;
       groupId?: number;
+      communityName?: string;
       days?: number;
       offset?: number;
       knownRevisions?: Record<string, string>;
@@ -356,7 +357,7 @@ export async function POST(request: Request) {
           averageResponse: row.averageResponse,
           slow: row.slow,
           unanswered: row.unanswered,
-        })), openaiKey, preferredModel)
+        })), openaiKey, preferredModel, communityName)
       : {
           dialogs: [],
           usage: { inputTokens: 0, outputTokens: 0, totalTokens: 0, estimatedCostUsd: 0 },

@@ -5,7 +5,7 @@ import { createClient, SupabaseClient, User } from "@supabase/supabase-js";
 
 type Period = "30" | "60" | "90";
 type Community = { id: number; name: string; photo: string | null };
-type StoredAnalysis = { stats: LiveStats; dialogs: LiveDialog[]; period: Period; accountId?: string; savedAt?: string; version?: 5 | 6 | 7 | 8 };
+type StoredAnalysis = { stats: LiveStats; dialogs: LiveDialog[]; period: Period; accountId?: string; savedAt?: string; version?: 5 | 6 | 7 | 8 | 9 };
 type AnalysisCheckpoint = {
   version: 1; savedAt: number; offset: number; totalAvailable: number | null; dialogs: LiveDialog[];
   reusedPeerIds: number[]; changedPeerIds: number[]; scannedCount: number; preferredModel: string;
@@ -407,16 +407,16 @@ export default function Home() {
 
     const savedFromAccount = connections.find((item) => item.id === community.id)?.latestAnalysis;
     const previous = newerAnalysis(savedFromAccount, cachedAnalysis(community.id), adAssignments[String(community.id)], community.id);
-    const reusable = previous && "stats" in previous && (previous.version === 5 || previous.version === 6 || previous.version === 7 || previous.version === 8) ? previous : null;
+    const reusable = previous && "stats" in previous && previous.version === 9 ? previous : null;
     const reusableDialogs = new Map<number, LiveDialog>();
     for (const dialog of reusable?.dialogs || []) {
-      if (dialog.revision && dialog.metrics && ((reusable?.version === 7 || reusable?.version === 8) ? Boolean(dialog.adId) : /^\d{5,}$/.test(dialog.adId || ""))) reusableDialogs.set(dialog.peerId, dialog);
+      if (dialog.revision && dialog.metrics && Boolean(dialog.adId)) reusableDialogs.set(dialog.peerId, dialog);
     }
     const knownRevisions = Object.fromEntries(
       [...reusableDialogs.values()].map((dialog) => [String(dialog.peerId), dialog.revision as string]),
     );
     const incremental = reusableDialogs.size > 0;
-    const checkpointKey = `dialogika-analysis-checkpoint-v1:${user?.id || ""}:${community.id}:${period}`;
+    const checkpointKey = `dialogika-analysis-checkpoint-v2:${user?.id || ""}:${community.id}:${period}`;
     let checkpoint: AnalysisCheckpoint | null = null;
     try {
       const saved = sessionStorage.getItem(checkpointKey);
@@ -469,6 +469,7 @@ export default function Home() {
                 senlerCredential: senlerConnections.find((item) => item.communityId === community.id)?.key || "",
                 preferredModel: model,
                 groupId: community.id,
+                communityName: community.name,
                 days: Number(period),
                 offset: pageOffset,
                 knownRevisions,
@@ -706,7 +707,7 @@ export default function Home() {
         period,
         accountId: adAssignments[String(community.id)] || undefined,
         savedAt: new Date().toISOString(),
-        version: 8,
+        version: 9,
       };
       setConnections((current) => current.map((item) => item.id === community.id ? { ...item, latestAnalysis: storedAnalysis } : item));
       cacheAnalysis(community.id, storedAnalysis);
@@ -814,9 +815,9 @@ export default function Home() {
           {data && liveStats && <>
             <div className="metrics">
               <Metric label="С рекламной меткой" value={data.dialogs.toLocaleString("ru-RU")} hint={`${(liveStats.replies ?? data.dialogs).toLocaleString("ru-RU")} с ответом клиента`} description="Все переписки с рекламной меткой и сообщением за период; отдельная доля показывает ответ клиента." />
-              <Metric label="Интерес к посещению" value={data.leads.toLocaleString("ru-RU")} hint={`${pct(data.leads, liveStats.replies ?? data.dialogs)}% от ответивших`} description="Человек спрашивал о билетах, выставке, экскурсии, мастер-классе, цене или записи. Это ещё не покупка." />
+              <Metric label="Интерес к предложению" value={data.leads.toLocaleString("ru-RU")} hint={`${pct(data.leads, liveStats.replies ?? data.dialogs)}% от ответивших`} description="Человек предметно спрашивал о товаре или услуге, цене, условиях, заказе или записи. Это ещё не покупка." />
               <Metric label="Клиент оставил телефон" value={data.contacts.toLocaleString("ru-RU")} hint={`${pct(data.contacts, liveStats.replies ?? data.dialogs)}% от ответивших`} description="Телефон найден в сообщении клиента. Номер, написанный менеджером, не учитывается." />
-              <Metric label="Запись или покупка" value={data.measurements.toLocaleString("ru-RU")} hint={`${pct(data.measurements, data.leads)}% от заинтересованных`} description="В переписке подтверждена запись, покупка билета или оплата. Один лишь вопрос о цене сюда не входит." />
+              <Metric label="Заказ, запись или покупка" value={data.measurements.toLocaleString("ru-RU")} hint={`${pct(data.measurements, data.leads)}% от заинтересованных`} description="В переписке подтверждены заказ, запись, договор, покупка или оплата. Один лишь вопрос о цене сюда не входит." />
               <Metric label="Среднее время ответа" value={data.response} danger={liveStats.responseMeasured && liveStats.averageResponse > 300} hint={liveStats.responseMeasured ? "между вопросом и ответом" : "в периоде нет пар вопрос–ответ"} description="Среднее время от первого входящего сообщения клиента до следующего ответа сообщества." />
             </div>
 
@@ -826,7 +827,7 @@ export default function Home() {
                 <div className="funnel">
                   <FunnelRow label="С рекламной меткой" value={data.dialogs} max={data.dialogs} color="#231f20" />
                   <FunnelRow label="Ответ клиента" value={liveStats.replies ?? data.dialogs} max={data.dialogs} color="#4a72d4" />
-                  <FunnelRow label="Интерес к посещению" value={data.leads} max={data.dialogs} color="#775cff" />
+                  <FunnelRow label="Интерес к предложению" value={data.leads} max={data.dialogs} color="#775cff" />
                   <FunnelRow label="Клиент оставил телефон" value={data.contacts} max={data.dialogs} color="#a493ff" />
                   <FunnelRow label="Запись или покупка подтверждена" value={data.measurements} max={data.dialogs} color="#40b78a" />
                 </div>

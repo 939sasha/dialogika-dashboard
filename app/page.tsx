@@ -14,7 +14,8 @@ type AnalysisCheckpoint = {
 };
 type SavedCommunity = Community & { token: string; credentialAvailable?: boolean; latestAnalysis?: StoredAnalysis | LiveStats | null };
 type SavedSenlerConnection = { communityId: number; name: string; photo: string | null; key: string; credentialAvailable?: boolean };
-type DashboardAccount = { projectId: string; accountId: string; name: string; sourcesAvailable: boolean };
+type DashboardAccount = { projectId: string; accountId: string; name: string; sourcesAvailable: boolean; adDetailAvailable: boolean };
+type AdCabinet = { connected: boolean; accountId: string | null; source?: "api" | "dashboard" | "dashboard-groups"; cachedMatches?: number };
 type DialogMetrics = { hasPhone: boolean; hasInterest: boolean; responseSum: number; responseCount: number; slowResponse: boolean; noNextStep: boolean; unanswered: boolean; firstEverDate: number | null; objectionKeys: string[] };
 type EvidenceMessage = { role: "Клиент" | "Менеджер"; text: string; date: string };
 type LiveDialog = { peerId: number; adId?: string | null; hasClientMessage?: boolean; score: number; status: string; issue: string; intent?: string; goal?: string; goalReached?: boolean; purchase?: boolean; nuance?: string; recommendation?: string; betterReply?: string; confidence?: number; objections?: string[]; revision?: string; lastMessageId?: number; lastMessageDate?: number; metrics?: DialogMetrics; aiAnalyzed?: boolean; aiModel?: string; evidence?: EvidenceMessage[] };
@@ -49,7 +50,7 @@ export default function Home() {
   const [adAssignments, setAdAssignments] = useState<Record<string, string | null>>({});
   const [serverAds, setServerAds] = useState<AdStat[]>([]);
   const [serverAdDialogTotal, setServerAdDialogTotal] = useState(0);
-  const [adCabinet, setAdCabinet] = useState<{ connected: boolean; accountId: string | null; cachedMatches?: number } | null>(null);
+  const [adCabinet, setAdCabinet] = useState<AdCabinet | null>(null);
   const [serverAdsStatus, setServerAdsStatus] = useState<"idle" | "loading" | "ready" | "error">("idle");
   const [serverAdsError, setServerAdsError] = useState("");
   const [community, setCommunity] = useState<Community | null>(null);
@@ -132,7 +133,7 @@ export default function Home() {
         if (!response.ok) throw new Error(result.error || "Не удалось загрузить объявления");
         return result;
       })
-      .then((result: { ads?: AdStat[]; dialogs?: number; cabinet?: { connected: boolean; accountId: string | null; cachedMatches?: number } }) => {
+      .then((result: { ads?: AdStat[]; dialogs?: number; cabinet?: AdCabinet }) => {
         if (cancelled) return;
         setServerAds(Array.isArray(result.ads) ? result.ads : []);
         setServerAdDialogTotal(Number(result.dialogs) || 0);
@@ -254,12 +255,12 @@ export default function Home() {
       const response = await fetch(`/api/ads/sources?communityId=${community.id}`, {
         headers: { authorization: `Bearer ${accessToken}` },
       });
-      const result = await response.json() as { sources?: unknown[]; error?: string };
+      const result = await response.json() as { sources?: unknown[]; source?: string; error?: string };
       if (!response.ok || !result.sources?.length) throw new Error(result.error || "Кабинет VK Ads не вернул объявления");
       setAdAssignments((current) => ({ ...current, [String(community.id)]: accountId }));
       const saved = connections.find((item) => item.id === community.id)?.latestAnalysis;
       restoreAnalysis(newerAnalysis(saved, cachedAnalysis(community.id), accountId, community.id));
-      setNotice(`Кабинет подключён к сообществу «${community.name}». Найдено ${result.sources.length} источников.`);
+      setNotice(`Кабинет подключён к сообществу «${community.name}». Найдено ${result.sources.length} источников.${result.source === "dashboard-groups" ? " В дашборде пока есть только ID групп: для меток отдельных объявлений потребуется их синхронизация." : ""}`);
     } catch (error) {
       setNotice(error instanceof Error ? error.message : "Не удалось подключить VK Ads");
     } finally {
@@ -964,10 +965,10 @@ function Settings({ community, connections, openaiConnected, senlerConnected, ad
         <p>Для каждого сообщества можно выбрать свой кабинет. В отчёт попадут только диалоги с метками его объявлений.</p>
         <label className="tokenLabel">Кабинет для {community?.name || "сообщества"}<select value={vkAdsValue} onChange={(e) => setVkAdsValue(e.target.value)} disabled={!community || busy}>
           <option value="">Не выбран</option>
-          {adAccounts.map((item) => <option key={item.projectId} value={item.accountId} disabled={!item.sourcesAvailable}>{item.name} · ID {item.accountId}{item.sourcesAvailable ? "" : " · нет синхронизированных объявлений"}</option>)}
+          {adAccounts.map((item) => <option key={item.projectId} value={item.accountId} disabled={!item.sourcesAvailable}>{item.name} · ID {item.accountId}{item.adDetailAvailable ? "" : " · пока только группы"}</option>)}
         </select></label>
         <button className="primary wide" disabled={busy || !community || vkAdsValue === adAccountId} onClick={() => onConnectVkAds(vkAdsValue)}>{busy ? "Проверяю кабинет…" : "Сохранить выбор →"}</button>
-        <p className="securityNote">Список берётся из ваших кабинетов дашборда. Кабинеты без синхронизированных объявлений пока недоступны для выбора.</p>
+        <p className="securityNote">Все кабинеты берутся из вашего дашборда. Если там пока сохранены только группы, метки отдельных объявлений появятся в сверке после синхронизации их ID.</p>
       </article>
       <article className="card connectionCard">
         <div className="stepLabel">ШАГ 3 · SENLER</div>
@@ -1057,7 +1058,7 @@ function DialogsTable({ query, setQuery, filteredDialogs, analyzed }: { query: s
   </div>;
 }
 
-function AdsDashboard({ stats, dialogs, serverAds, serverDialogTotal, serverStatus, serverError, cabinet, accessToken, communityId, onAnalyze }: { stats: LiveStats | null; dialogs: LiveDialog[]; serverAds: AdStat[]; serverDialogTotal: number; serverStatus: "idle" | "loading" | "ready" | "error"; serverError: string; cabinet: { connected: boolean; accountId: string | null; cachedMatches?: number } | null; accessToken: string; communityId: number | null; onAnalyze: () => void }) {
+function AdsDashboard({ stats, dialogs, serverAds, serverDialogTotal, serverStatus, serverError, cabinet, accessToken, communityId, onAnalyze }: { stats: LiveStats | null; dialogs: LiveDialog[]; serverAds: AdStat[]; serverDialogTotal: number; serverStatus: "idle" | "loading" | "ready" | "error"; serverError: string; cabinet: AdCabinet | null; accessToken: string; communityId: number | null; onAnalyze: () => void }) {
   const panelRef = useRef<HTMLElement>(null);
   const [selectedAdId, setSelectedAdId] = useState<string | null>(null);
   const [detailStatus, setDetailStatus] = useState<"idle" | "loading" | "ready" | "error">("idle");
@@ -1181,14 +1182,14 @@ function AdsDashboard({ stats, dialogs, serverAds, serverDialogTotal, serverStat
 
   if (serverStatus === "loading" || serverStatus === "error" || serverStatus === "ready") return <div className="pageBlock adsPage">
     <div className="introRow"><div><p className="eyebrow">АТРИБУЦИЯ VK РЕКЛАМЫ · v3.1</p><h2>Какие источники привели обращения</h2><p>Нажмите на источник, чтобы открыть примеры диалогов и проверить классификацию.</p></div></div>
-    {serverStatus==="ready"&&<div className="adDataState">Кабинет VK Ads · ID {cabinet?.accountId}. В таблице только его источники.</div>}
+    {serverStatus==="ready"&&<div className="adDataState">Кабинет VK Ads · ID {cabinet?.accountId}. В таблице только его источники.{cabinet?.source === "dashboard-groups" ? " В дашборде пока есть только ID групп: метки отдельных объявлений не удастся подтвердить до их синхронизации." : ""}</div>}
     {serverStatus==="loading"&&<div className="adDataState">Загружаю статистику объявлений…</div>}
     {serverStatus==="error"&&<div className="adDataState error">Не удалось сверить источники: {serverError}. Сохранённые числа доступны ниже.</div>}
     {ads.length>0&&serverStatus!=="loading"&&<>
       <div className="adDataState success">Загружено: {ads.length} рекламных меток · {ads.reduce((s,a)=>s+a.dialogs,0)} переписок с меткой · {ads.reduce((s,a)=>s+(a.replies ?? a.dialogs),0)} с ответом клиента</div>
       <p className="adDefinitions">Все переписки с рекламной меткой включены. «Ответ клиента» отделяет реальные обращения от рассылок без отклика; ИИ оценивает содержание только после ответа. Покупка и телефон подтверждаются перепиской. Качество рассчитано по перепискам с ответом клиента.</p>
       <div className="simpleAdsTable"><table><thead><tr><th>Источник / объявление VK</th><th>С меткой</th><th>Ответ клиента</th><th>Интерес</th><th>Запись / покупка</th><th>Покупка</th><th>Телефон</th><th>Потеряны</th><th>Качество</th></tr></thead><tbody>
-      {ads.map((ad)=>{const replied=ad.replies ?? ad.dialogs;const q=replied?Math.round(ad.scoreSum/replied):0;return <tr key={ad.adId}><td className="adIdentity"><button className="adIdentityButton" onClick={()=>openAdDialogs(ad.adId)}><b>{sourceTitle(ad)}</b><small>{ad.matched?(ad.matchType==="campaign"?`ID кампании: ${ad.adId}`:ad.matchType==="group"?`ID группы: ${ad.adId}`:`ID объявления: ${ad.adId}${ad.groupId?` · группа ${ad.groupName || ad.groupId}`:""}${ad.campaignId?` · кампания ${ad.campaignName || ad.campaignId}`:""}`):(ad.lookupUnavailable?ad.lookupReason||"Кабинет VK Ads не ответил":"ID не найден в подключённом кабинете «Эмалис».")}</small><em>Открыть диалоги →</em></button></td><td>{ad.dialogs}</td><td>{replied} · {pct(replied,ad.dialogs)}%</td><td>{ad.leads} · {pct(ad.leads,replied)}%</td><td>{ad.targets} · {pct(ad.targets,replied)}%</td><td>{ad.purchases == null ? "—" : `${ad.purchases} · ${pct(ad.purchases,replied)}%`}</td><td>{ad.phones == null ? "—" : `${ad.phones} · ${pct(ad.phones,replied)}%`}</td><td>{ad.lost} · {pct(ad.lost,replied)}%</td><td>{replied?<b>{q}/100</b>:"—"}</td></tr>})}
+      {ads.map((ad)=>{const replied=ad.replies ?? ad.dialogs;const q=replied?Math.round(ad.scoreSum/replied):0;return <tr key={ad.adId}><td className="adIdentity"><button className="adIdentityButton" onClick={()=>openAdDialogs(ad.adId)}><b>{sourceTitle(ad)}</b><small>{ad.matched?(ad.matchType==="campaign"?`ID кампании: ${ad.adId}`:ad.matchType==="group"?`ID группы: ${ad.adId}`:`ID объявления: ${ad.adId}${ad.groupId?` · группа ${ad.groupName || ad.groupId}`:""}${ad.campaignId?` · кампания ${ad.campaignName || ad.campaignId}`:""}`):(ad.lookupUnavailable?ad.lookupReason||"Кабинет VK Ads не ответил":"ID не найден в выбранном кабинете VK Ads.")}</small><em>Открыть диалоги →</em></button></td><td>{ad.dialogs}</td><td>{replied} · {pct(replied,ad.dialogs)}%</td><td>{ad.leads} · {pct(ad.leads,replied)}%</td><td>{ad.targets} · {pct(ad.targets,replied)}%</td><td>{ad.purchases == null ? "—" : `${ad.purchases} · ${pct(ad.purchases,replied)}%`}</td><td>{ad.phones == null ? "—" : `${ad.phones} · ${pct(ad.phones,replied)}%`}</td><td>{ad.lost} · {pct(ad.lost,replied)}%</td><td>{replied?<b>{q}/100</b>:"—"}</td></tr>})}
       </tbody></table></div>
     </>}
     {panel}

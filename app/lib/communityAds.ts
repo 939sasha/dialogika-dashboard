@@ -6,7 +6,7 @@ export async function dashboardAccounts(client: SupabaseClient, userId: string) 
     .select("id,name,vk_account_id,connection_type")
     .eq("user_id", userId).eq("connection_type", "api").not("vk_account_id", "is", null);
   if (error) throw error;
-  const available = new Set<string>();
+  const detailed = new Set<string>();
   if (projects?.length) {
     for (let offset = 0; offset < 5000; offset += 1000) {
       const { data: entities, error: entityError } = await client.from("ad_entities")
@@ -14,13 +14,25 @@ export async function dashboardAccounts(client: SupabaseClient, userId: string) 
         .eq("platform", "vk").in("entity_type", ["ad", "ad_group"])
         .range(offset, offset + 999);
       if (entityError) throw entityError;
-      for (const item of entities || []) available.add(item.project_id);
+      for (const item of entities || []) detailed.add(item.project_id);
       if ((entities || []).length < 1000) break;
+    }
+  }
+  const available = new Set<string>();
+  if (projects?.length) {
+    for (let offset = 0; offset < 5000; offset += 1000) {
+      const { data: campaigns, error: campaignError } = await client.from("campaigns")
+        .select("project_id").in("project_id", projects.map((item) => item.id))
+        .range(offset, offset + 999);
+      if (campaignError) throw campaignError;
+      for (const item of campaigns || []) available.add(item.project_id);
+      if ((campaigns || []).length < 1000) break;
     }
   }
   return (projects || []).map((item) => ({
     projectId: item.id, accountId: String(item.vk_account_id), name: item.name,
-    sourcesAvailable: available.has(item.id) || String(item.vk_account_id) === EMALIS_ACCOUNT_ID,
+    sourcesAvailable: available.has(item.id) || detailed.has(item.id) || String(item.vk_account_id) === EMALIS_ACCOUNT_ID,
+    adDetailAvailable: detailed.has(item.id) || String(item.vk_account_id) === EMALIS_ACCOUNT_ID,
   }));
 }
 
@@ -55,6 +67,20 @@ export async function verifiedSources(client: SupabaseClient, userId: string, co
       matchType === "group" ? { groupId: String(item.external_id), groupName: item.name } :
       { campaignId: String(item.external_id), campaignName: item.name }) }];
   });
-  if (!sources.length) throw new Error("Для этого кабинета в дашборде ещё нет синхронизированных объявлений");
-  return { accountId, accountName: project.name, sources, source: "dashboard" as const };
+  const byId = new Map(sources.map((item) => [item.adId, item]));
+  for (let offset = 0; offset < 5000; offset += 1000) {
+    const { data: campaigns, error: campaignError } = await client.from("campaigns")
+      .select("external_id,name").eq("project_id", project.projectId).range(offset, offset + 999);
+    if (campaignError) throw campaignError;
+    for (const item of campaigns || []) {
+      const id = String(item.external_id);
+      if (/^\d+$/.test(id) && !byId.has(id)) byId.set(id, {
+        adId: id, matchType: "group", groupId: id, groupName: item.name,
+      });
+    }
+    if ((campaigns || []).length < 1000) break;
+  }
+  if (!byId.size) throw new Error("Для этого кабинета в дашборде ещё нет синхронизированных источников");
+  return { accountId, accountName: project.name, sources: [...byId.values()],
+    source: project.adDetailAvailable ? "dashboard" as const : "dashboard-groups" as const };
 }

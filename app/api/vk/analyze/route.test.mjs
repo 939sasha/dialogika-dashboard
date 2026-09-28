@@ -116,16 +116,16 @@ test("включает рекламную рассылку в охват, но �
   assert.equal(calls.length, 2);
 });
 
-test("не считает метку размещения ID рекламного объявления", async () => {
+test("сохраняет явную текстовую метку рекламы как отдельный источник без ID объявления", async () => {
   const now = Math.floor(Date.now() / 1000);
-  const inbound = { id: 88, date: now, from_id: 101, peer_id: 101, out: 0,
-    text: "Здравствуйте", ref: "feed_top", ref_source: "vk_ads" };
+  const outbound = { id: 88, date: now, from_id: -109534321, peer_id: 101, out: 1,
+    text: "Анонс", ref: "feed_top", ref_source: "vk_ads" };
   globalThis.fetch = async (input) => {
     const url = new URL(String(input));
     if (url.pathname.endsWith("/messages.getConversations")) {
-      return Response.json({ response: { count: 1, items: [{ conversation: { peer: { id: 101 } }, last_message: inbound }] } });
+      return Response.json({ response: { count: 1, items: [{ conversation: { peer: { id: 101 } }, last_message: outbound }] } });
     }
-    if (url.pathname.endsWith("/messages.getHistory")) return Response.json({ response: { count: 1, items: [inbound] } });
+    if (url.pathname.endsWith("/messages.getHistory")) return Response.json({ response: { count: 1, items: [outbound] } });
     throw new Error("Unexpected request: " + url);
   };
   const response = await POST(new Request("https://dashboard.test/api/vk/analyze", {
@@ -134,6 +134,8 @@ test("не считает метку размещения ID рекламног�
   }));
   assert.equal(response.status, 200);
   const data = await response.json();
-  assert.equal(data.changedDialogs, 0);
-  assert.deepEqual(data.dialogs, []);
+  assert.equal(data.changedDialogs, 1);
+  assert.equal(data.dialogs[0].adId, "vk_ads:feed_top");
+  assert.equal(data.dialogs[0].status, "Нет ответа клиента");
+  assert.equal(data.ai.analyzedCount, 0);
 });

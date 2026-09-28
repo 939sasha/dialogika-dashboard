@@ -68,7 +68,7 @@ async function enrichWithVkAds(ads: AdStat[], communityId: string) {
   if (!ads.length) return ads;
   if (!vkToken || communityId !== EMALIS_COMMUNITY_ID) return ads.map((ad) => ad.matched ? ad : ({
     ...ad, matched: false, lookupUnavailable: true,
-    lookupReason: communityId !== EMALIS_COMMUNITY_ID ? "Для этого сообщества рекламный кабинет ещё не подключён" : "Ключ кабинета VK Ads не настроен на сервере",
+    lookupReason: ad.adId.startsWith("vk_ads:") ? "Рекламная метка VK без ID объявления" : communityId !== EMALIS_COMMUNITY_ID ? "Для этого сообщества рекламный кабинет ещё не подключён" : "Ключ кабинета VK Ads не настроен на сервере",
   }));
   try {
     const sourceIds = [...new Set(ads.map((ad) => ad.adId).filter((id) => /^\d+$/.test(id)))];

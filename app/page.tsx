@@ -341,7 +341,7 @@ export default function Home() {
     const reusable = previous && "stats" in previous && (previous.version === 5 || previous.version === 6 || previous.version === 7) ? previous : null;
     const reusableDialogs = new Map<number, LiveDialog>();
     for (const dialog of reusable?.dialogs || []) {
-      if (dialog.revision && dialog.metrics && /^\d{5,}$/.test(dialog.adId || "")) reusableDialogs.set(dialog.peerId, dialog);
+      if (dialog.revision && dialog.metrics && (reusable?.version === 7 ? Boolean(dialog.adId) : /^\d{5,}$/.test(dialog.adId || ""))) reusableDialogs.set(dialog.peerId, dialog);
     }
     const knownRevisions = Object.fromEntries(
       [...reusableDialogs.values()].map((dialog) => [String(dialog.peerId), dialog.revision as string]),
@@ -1018,6 +1018,7 @@ function AdsDashboard({ stats, dialogs, serverAds, serverDialogTotal, serverStat
   const selectedAd = selectedAdId ? ads.find((ad)=>ad.adId===selectedAdId) : null;
 
   function sourceTitle(ad: AdStat) {
+    if (ad.adId.startsWith("vk_ads:")) return `Рекламная метка «${ad.adId.slice(7)}»`;
     if (!ad.matched) return `Метка ${ad.adId}`;
     if (ad.matchType === "campaign") return `Кампания «${ad.campaignName || ad.adId}»`;
     if (ad.matchType === "group") return `Группа «${ad.groupName || ad.adId}»`;

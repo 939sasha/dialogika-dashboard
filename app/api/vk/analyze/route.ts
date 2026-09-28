@@ -167,7 +167,9 @@ function senlerAdId(item: SenlerSubscriber) {
   const preferred = candidates.find(({ value, source }) => value && /vk[_\s-]?ads|реклам/i.test(String(source || "")));
   const numeric = candidates.find(({ value }) => /^\d{5,}$/.test(String(value || "").trim()));
   const selected = preferred && /^\d{5,}$/.test(String(preferred.value).trim()) ? preferred : numeric;
-  return selected ? String(selected.value).trim() : null;
+  if (selected) return String(selected.value).trim();
+  const explicitAdRef = preferred && String(preferred.value).trim().slice(0, 80);
+  return explicitAdRef ? `vk_ads:${explicitAdRef}` : null;
 }
 
 async function getSenlerAds(credential: SenlerCredential | null, peerIds: number[]) {
@@ -196,7 +198,9 @@ async function getSenlerAds(credential: SenlerCredential | null, peerIds: number
 
 function adIdFromMessage(message: VkMessage) {
   const ref = message.ref?.trim();
-  return ref && /^\d{5,}$/.test(ref) ? ref : null;
+  if (!ref) return null;
+  if (/^\d{5,}$/.test(ref)) return ref;
+  return /vk[_\s-]?ads|реклам/i.test(message.ref_source || "") ? `vk_ads:${ref.slice(0, 80)}` : null;
 }
 
 function messageRevision(message?: VkMessage) {

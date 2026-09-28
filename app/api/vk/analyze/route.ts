@@ -272,7 +272,7 @@ function analyzeDialog(messages: VkMessage[]) {
 
 export async function POST(request: Request) {
   try {
-    const { token, openaiKey, senlerCredential, preferredModel, groupId, communityName, days = 30, offset = 0, knownRevisions = {}, verifiedAdIds } = await request.json() as {
+    const { token, openaiKey, senlerCredential, preferredModel, groupId, communityName, days = 30, offset = 0, knownRevisions = {}, verifiedAdIds, senlerAdByPeer } = await request.json() as {
       token?: string;
       openaiKey?: string;
       senlerCredential?: string;
@@ -283,6 +283,7 @@ export async function POST(request: Request) {
       offset?: number;
       knownRevisions?: Record<string, string>;
       verifiedAdIds?: string[];
+      senlerAdByPeer?: Record<string, string>;
     };
     if (!token || !groupId || ![30, 60, 90].includes(days) || offset < 0 ||
         (!Array.isArray(verifiedAdIds) || !verifiedAdIds.length)) {
@@ -347,7 +348,10 @@ export async function POST(request: Request) {
     const withVkMarker = attributedRows.filter((row) => Boolean(row.adId)).length;
 
     const senlerAds = await getSenlerAds(parseSenlerCredential(senlerCredential), attributedRows.map((row) => row.peerId));
-    for (const row of attributedRows) if (!row.adId) row.adId = senlerAds.get(row.peerId) || null;
+    for (const row of attributedRows) if (!row.adId) {
+      const fromDashboard = senlerAdByPeer?.[String(row.peerId)];
+      row.adId = fromDashboard && allowedAds.has(fromDashboard) ? fromDashboard : senlerAds.get(row.peerId) || null;
+    }
     const rows = attributedRows.filter((row) => Boolean(row.adId) && (!allowedAds || allowedAds.has(row.adId as string)));
     const attribution = {
       recentConversations: active.length,

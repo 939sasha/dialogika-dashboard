@@ -25,7 +25,7 @@ export async function GET(request: Request) {
   try {
     const { client, user } = await authorizedClient(request);
     const sources = await verifiedSources(client, user.id, communityId);
-    const { data: project, error: projectError } = await client.from("projects").select("id")
+    const { data: project, error: projectError } = await client.from("projects").select("id,senler_group_id,senler_external_id")
       .eq("user_id", user.id).eq("connection_type", "api").eq("vk_account_id", sources.accountId).maybeSingle();
     if (projectError || !project) throw projectError || new Error("Кабинет не найден");
     const { data: ads, error: adsError } = await client.from("ad_entities").select("raw_payload")
@@ -39,7 +39,8 @@ export async function GET(request: Request) {
     const { data: senler, error: senlerError } = await client.from("dialogika_connections").select("id")
       .eq("user_id", user.id).eq("kind", "senler").eq("external_id", communityId).maybeSingle();
     if (senlerError) throw senlerError;
-    return Response.json({ ...sources, miniAppAds, senlerConnected: Boolean(senler) });
+    return Response.json({ ...sources, miniAppAds, senlerConnected: Boolean(senler),
+      dashboardSenlerConnected: Boolean(project.senler_group_id && String(project.senler_external_id) === communityId) });
   } catch (error) {
     const message = error instanceof Error ? error.message : "VK Ads недоступен";
     return Response.json({ error: message }, { status: message === "Требуется вход" ? 401 : 503 });

@@ -5,7 +5,7 @@ import { createClient, SupabaseClient, User } from "@supabase/supabase-js";
 
 type Period = "30" | "60" | "90";
 type Community = { id: number; name: string; photo: string | null };
-type StoredAnalysis = { stats: LiveStats; dialogs: LiveDialog[]; period: Period; savedAt?: string; version?: 5 | 6 | 7 | 8 };
+type StoredAnalysis = { stats: LiveStats; dialogs: LiveDialog[]; period: Period; accountId?: string; savedAt?: string; version?: 5 | 6 | 7 | 8 };
 type AnalysisCheckpoint = {
   version: 1; savedAt: number; offset: number; totalAvailable: number | null; dialogs: LiveDialog[];
   reusedPeerIds: number[]; changedPeerIds: number[]; scannedCount: number; preferredModel: string;
@@ -14,6 +14,7 @@ type AnalysisCheckpoint = {
 };
 type SavedCommunity = Community & { token: string; credentialAvailable?: boolean; latestAnalysis?: StoredAnalysis | LiveStats | null };
 type SavedSenlerConnection = { communityId: number; name: string; photo: string | null; key: string; credentialAvailable?: boolean };
+type DashboardAccount = { projectId: string; accountId: string; name: string; sourcesAvailable: boolean };
 type DialogMetrics = { hasPhone: boolean; hasInterest: boolean; responseSum: number; responseCount: number; slowResponse: boolean; noNextStep: boolean; unanswered: boolean; firstEverDate: number | null; objectionKeys: string[] };
 type EvidenceMessage = { role: "Клиент" | "Менеджер"; text: string; date: string };
 type LiveDialog = { peerId: number; adId?: string | null; hasClientMessage?: boolean; score: number; status: string; issue: string; intent?: string; goal?: string; goalReached?: boolean; purchase?: boolean; nuance?: string; recommendation?: string; betterReply?: string; confidence?: number; objections?: string[]; revision?: string; lastMessageId?: number; lastMessageDate?: number; metrics?: DialogMetrics; aiAnalyzed?: boolean; aiModel?: string; evidence?: EvidenceMessage[] };
@@ -44,7 +45,8 @@ export default function Home() {
   const [token, setToken] = useState("");
   const [openaiKey, setOpenaiKey] = useState("");
   const [senlerConnections, setSenlerConnections] = useState<SavedSenlerConnection[]>([]);
-  const [vkAdsConnected, setVkAdsConnected] = useState(false);
+  const [adAccounts, setAdAccounts] = useState<DashboardAccount[]>([]);
+  const [adAssignments, setAdAssignments] = useState<Record<string, string | null>>({});
   const [serverAds, setServerAds] = useState<AdStat[]>([]);
   const [serverAdDialogTotal, setServerAdDialogTotal] = useState(0);
   const [adCabinet, setAdCabinet] = useState<{ connected: boolean; accountId: string | null; cachedMatches?: number } | null>(null);
@@ -80,7 +82,7 @@ export default function Home() {
     let cancelled = false;
     (async () => {
       const response = await fetch("/api/settings", { headers: { authorization: `Bearer ${accessToken}` } });
-      const result = await response.json() as { communities?: SavedCommunity[]; routerKey?: string; routerCredentialAvailable?: boolean; senlerConnections?: SavedSenlerConnection[]; vkAdsConnected?: boolean; credentialRecoveryNeeded?: boolean; error?: string };
+      const result = await response.json() as { communities?: SavedCommunity[]; routerKey?: string; routerCredentialAvailable?: boolean; senlerConnections?: SavedSenlerConnection[]; adAccounts?: DashboardAccount[]; adAssignments?: Record<string, string | null>; credentialRecoveryNeeded?: boolean; error?: string };
       if (!response.ok) throw new Error(result.error || "Не удалось загрузить подключения");
       let saved = result.communities || [];
       const local = JSON.parse(localStorage.getItem("dialogika.communities.v1") || "[]") as SavedCommunity[];
@@ -103,7 +105,8 @@ export default function Home() {
       setConnections(saved);
       setOpenaiKey(result.routerKey || localRouter);
       setSenlerConnections(result.senlerConnections || []);
-      setVkAdsConnected(Boolean(result.vkAdsConnected));
+      setAdAccounts(result.adAccounts || []);
+      setAdAssignments(result.adAssignments || {});
       if (result.credentialRecoveryNeeded) {
         setNotice("Подключения найдены, но серверный ключ шифрования недоступен. Сохранённые данные и последний анализ восстановлены; ключи VK, Router Cheap и Senler пока нельзя использовать.");
       }
@@ -112,7 +115,7 @@ export default function Home() {
       if (selected) {
         setCommunity({ id: selected.id, name: selected.name, photo: selected.photo });
         setToken(selected.token);
-        restoreAnalysis(newerAnalysis(selected.latestAnalysis, cachedAnalysis(selected.id)));
+        restoreAnalysis(newerAnalysis(selected.latestAnalysis, cachedAnalysis(selected.id), result.adAssignments?.[String(selected.id)], selected.id));
       }
       localStorage.removeItem("dialogika.communities.v1");
       localStorage.removeItem("dialogika.routerCheapKey.v1");
@@ -236,21 +239,28 @@ export default function Home() {
     }
   }
 
-  async function connectVkAds(value: string) {
+  async function connectVkAds(accountId: string) {
+    if (!community) return;
     setBusy(true);
     setNotice("");
     try {
-      const credential = value.trim().replace(/^Bearer\s+/i, "").replace(/^["']|["']$/g, "").trim();
-      await saveSetting({ kind: "vk_ads", externalId: "29867480", name: "VK Ads Эмалис", credential }, accessToken);
-      const response = await fetch("/api/ads/sources?communityId=109534321", {
+      await saveSetting({ kind: "vk", externalId: String(community.id), adAccountId: accountId || null }, accessToken);
+      if (!accountId) {
+        setAdAssignments((current) => ({ ...current, [String(community.id)]: null }));
+        setLiveStats(null); setLiveDialogs([]);
+        setNotice(`Рекламный кабинет отключён от сообщества «${community.name}».`);
+        return;
+      }
+      const response = await fetch(`/api/ads/sources?communityId=${community.id}`, {
         headers: { authorization: `Bearer ${accessToken}` },
       });
       const result = await response.json() as { sources?: unknown[]; error?: string };
       if (!response.ok || !result.sources?.length) throw new Error(result.error || "Кабинет VK Ads не вернул объявления");
-      setVkAdsConnected(true);
-      setNotice(`Кабинет «Эмалис» подключён. Подтверждено ${result.sources.length} источников VK Ads.`);
+      setAdAssignments((current) => ({ ...current, [String(community.id)]: accountId }));
+      const saved = connections.find((item) => item.id === community.id)?.latestAnalysis;
+      restoreAnalysis(newerAnalysis(saved, cachedAnalysis(community.id), accountId, community.id));
+      setNotice(`Кабинет подключён к сообществу «${community.name}». Найдено ${result.sources.length} источников.`);
     } catch (error) {
-      setVkAdsConnected(false);
       setNotice(error instanceof Error ? error.message : "Не удалось подключить VK Ads");
     } finally {
       setBusy(false);
@@ -260,7 +270,7 @@ export default function Home() {
   function selectCommunity(item: SavedCommunity) {
     setCommunity({ id: item.id, name: item.name, photo: item.photo });
     setToken(item.token);
-    restoreAnalysis(newerAnalysis(item.latestAnalysis, cachedAnalysis(item.id)));
+    restoreAnalysis(newerAnalysis(item.latestAnalysis, cachedAnalysis(item.id), adAssignments[String(item.id)], item.id));
     localStorage.setItem("dialogika.activeCommunity.v1", String(item.id));
     setNotice(`Выбрано сообщество «${item.name}».`);
   }
@@ -313,7 +323,12 @@ export default function Home() {
     }
   }
 
-  function newerAnalysis(server: SavedCommunity["latestAnalysis"], local: StoredAnalysis | null) {
+  function newerAnalysis(server: SavedCommunity["latestAnalysis"], local: StoredAnalysis | null, accountId?: string | null, communityId?: number) {
+    const matches = (analysis: SavedCommunity["latestAnalysis"]) => Boolean(accountId && analysis &&
+      ("stats" in analysis ? (analysis.accountId || (communityId === 109534321 ? "29867480" : "")) === accountId :
+        communityId === 109534321 && accountId === "29867480"));
+    if (!matches(server)) server = null;
+    if (!matches(local)) local = null;
     if (!local) return server;
     if (!server || !("stats" in server)) return local;
     const serverTime = Date.parse(server.savedAt || "");
@@ -360,24 +375,24 @@ export default function Home() {
     }
 
     let verifiedAdIds: Set<string> | null = null;
-    if (community.id === 109534321) {
+    if (adAssignments[String(community.id)]) {
       try {
         const response = await fetch(`/api/ads/sources?communityId=${community.id}`, {
           headers: { authorization: `Bearer ${accessToken}` },
         });
         const result = await response.json() as { accountId?: string; sources?: Array<{ adId: string }>; error?: string };
-        if (!response.ok || result.accountId !== "29867480" || !result.sources?.length) {
-          throw new Error(result.error || "Не удалось подтвердить источники кабинета «Эмалис»");
+        if (!response.ok || result.accountId !== adAssignments[String(community.id)] || !result.sources?.length) {
+          throw new Error(result.error || "Не удалось подтвердить источники выбранного кабинета");
         }
         verifiedAdIds = new Set(result.sources.map((source) => source.adId));
       } catch (error) {
         setNotice(error instanceof Error ? error.message : "VK Ads недоступен. Предыдущий отчёт сохранён.");
         return;
       }
-    }
+    } else { setTab("Настройки"); setNotice("Выберите рекламный кабинет для этого сообщества."); return; }
 
     const savedFromAccount = connections.find((item) => item.id === community.id)?.latestAnalysis;
-    const previous = newerAnalysis(savedFromAccount, cachedAnalysis(community.id));
+    const previous = newerAnalysis(savedFromAccount, cachedAnalysis(community.id), adAssignments[String(community.id)], community.id);
     const reusable = previous && "stats" in previous && (previous.version === 5 || previous.version === 6 || previous.version === 7 || previous.version === 8) ? previous : null;
     const reusableDialogs = new Map<number, LiveDialog>();
     for (const dialog of reusable?.dialogs || []) {
@@ -675,6 +690,7 @@ export default function Home() {
         stats: completedStats,
         dialogs: analyzedDialogs,
         period,
+        accountId: adAssignments[String(community.id)] || undefined,
         savedAt: new Date().toISOString(),
         version: 8,
       };
@@ -845,7 +861,7 @@ export default function Home() {
         {tab === "Диалоги" && <DialogsTable query={query} setQuery={setQuery} filteredDialogs={filteredDialogs} analyzed={Boolean(liveStats)} />}
         {tab === "Качество" && <Quality stats={liveStats} />}
         {tab === "ИИ-бот" && <Bot goal={liveStats?.goal} />}
-        {tab === "Настройки" && <Settings community={community} connections={connections} openaiConnected={Boolean(openaiKey)} senlerConnected={Boolean(community && senlerConnections.some((item) => item.communityId === community.id && Boolean(item.key)))} vkAdsConnected={vkAdsConnected} busy={busy} onConnect={connectCommunity} onSelect={selectCommunity} onConnectOpenAI={connectOpenAI} onConnectSenler={connectSenler} onConnectVkAds={connectVkAds} onDisconnectOpenAI={async () => { await deleteSetting("router", "default", accessToken); setOpenaiKey(""); setNotice("Router Cheap отключён. Ключ удалён из вашего аккаунта."); }} onDisconnectSenler={async () => { if (!community) return; await deleteSetting("senler", String(community.id), accessToken); setSenlerConnections((current) => current.filter((item) => item.communityId !== community.id)); setNotice("Senler отключён. Ключ удалён из вашего аккаунта."); }} onDisconnect={disconnectCommunity} />}
+        {tab === "Настройки" && <Settings community={community} connections={connections} openaiConnected={Boolean(openaiKey)} senlerConnected={Boolean(community && senlerConnections.some((item) => item.communityId === community.id && Boolean(item.key)))} adAccounts={adAccounts} adAccountId={community ? adAssignments[String(community.id)] || "" : ""} busy={busy} onConnect={connectCommunity} onSelect={selectCommunity} onConnectOpenAI={connectOpenAI} onConnectSenler={connectSenler} onConnectVkAds={connectVkAds} onDisconnectOpenAI={async () => { await deleteSetting("router", "default", accessToken); setOpenaiKey(""); setNotice("Router Cheap отключён. Ключ удалён из вашего аккаунта."); }} onDisconnectSenler={async () => { if (!community) return; await deleteSetting("senler", String(community.id), accessToken); setSenlerConnections((current) => current.filter((item) => item.communityId !== community.id)); setNotice("Senler отключён. Ключ удалён из вашего аккаунта."); }} onDisconnect={disconnectCommunity} />}
       </section>
     </main>
   );
@@ -899,12 +915,13 @@ function Login({ client }: { client: SupabaseClient | null }) {
   </section></main>;
 }
 
-function Settings({ community, connections, openaiConnected, senlerConnected, vkAdsConnected, busy, onConnect, onSelect, onConnectOpenAI, onConnectSenler, onConnectVkAds, onDisconnectOpenAI, onDisconnectSenler, onDisconnect }: { community: Community | null; connections: SavedCommunity[]; openaiConnected: boolean; senlerConnected: boolean; vkAdsConnected: boolean; busy: boolean; onConnect: (token: string) => void; onSelect: (community: SavedCommunity) => void; onConnectOpenAI: (key: string) => void; onConnectSenler: (key: string, groupId: string) => void; onConnectVkAds: (key: string) => void; onDisconnectOpenAI: () => void; onDisconnectSenler: () => void; onDisconnect: () => void }) {
+function Settings({ community, connections, openaiConnected, senlerConnected, adAccounts, adAccountId, busy, onConnect, onSelect, onConnectOpenAI, onConnectSenler, onConnectVkAds, onDisconnectOpenAI, onDisconnectSenler, onDisconnect }: { community: Community | null; connections: SavedCommunity[]; openaiConnected: boolean; senlerConnected: boolean; adAccounts: DashboardAccount[]; adAccountId: string; busy: boolean; onConnect: (token: string) => void; onSelect: (community: SavedCommunity) => void; onConnectOpenAI: (key: string) => void; onConnectSenler: (key: string, groupId: string) => void; onConnectVkAds: (accountId: string) => void; onDisconnectOpenAI: () => void; onDisconnectSenler: () => void; onDisconnect: () => void }) {
   const [value, setValue] = useState("");
   const [aiValue, setAiValue] = useState("");
   const [senlerValue, setSenlerValue] = useState("");
   const [senlerGroupId, setSenlerGroupId] = useState("");
   const [vkAdsValue, setVkAdsValue] = useState("");
+  useEffect(() => { setVkAdsValue(adAccountId); }, [adAccountId, community?.id]);
   const selectedConnection = community ? connections.find((item) => item.id === community.id) : null;
   const vkCredentialNeedsRecovery = selectedConnection?.credentialAvailable === false;
   return <div className="settingsPage">
@@ -942,12 +959,15 @@ function Settings({ community, connections, openaiConnected, senlerConnected, vk
         </>}
       </article>
       <article className="card connectionCard">
-        <div className="stepLabel">РЕКЛАМНЫЙ КАБИНЕТ · ЭМАЛИС</div>
-        <h3>{vkAdsConnected ? "VK Ads подключён · ID 29867480" : "Подключить VK Ads кабинет"}</h3>
-        <p>По этому кабинету сверяются метки объявлений. Другие кабинеты не входят в итоговую сводку.</p>
-        <label className="tokenLabel">Токен VK Ads кабинета<input type="password" autoComplete="off" value={vkAdsValue} onChange={(e) => setVkAdsValue(e.target.value)} placeholder="Токен рекламного кабинета" /></label>
-        <button className="primary wide" disabled={busy || vkAdsValue.length < 10} onClick={() => { onConnectVkAds(vkAdsValue); setVkAdsValue(""); }}>{busy ? "Проверяю кабинет…" : vkAdsConnected ? "Обновить подключение →" : "Подключить кабинет →"}</button>
-        <p className="securityNote">Ключ хранится в Supabase Vault. В отчёт попадают только объявления, подтверждённые API кабинета 29867480.</p>
+        <div className="stepLabel">РЕКЛАМНЫЙ КАБИНЕТ VK ADS</div>
+        <h3>{adAccountId ? "Кабинет подключён к выбранному сообществу" : "Выберите кабинет из дашборда"}</h3>
+        <p>Для каждого сообщества можно выбрать свой кабинет. В отчёт попадут только диалоги с метками его объявлений.</p>
+        <label className="tokenLabel">Кабинет для {community?.name || "сообщества"}<select value={vkAdsValue} onChange={(e) => setVkAdsValue(e.target.value)} disabled={!community || busy}>
+          <option value="">Не выбран</option>
+          {adAccounts.map((item) => <option key={item.projectId} value={item.accountId} disabled={!item.sourcesAvailable}>{item.name} · ID {item.accountId}{item.sourcesAvailable ? "" : " · нет синхронизированных объявлений"}</option>)}
+        </select></label>
+        <button className="primary wide" disabled={busy || !community || vkAdsValue === adAccountId} onClick={() => onConnectVkAds(vkAdsValue)}>{busy ? "Проверяю кабинет…" : "Сохранить выбор →"}</button>
+        <p className="securityNote">Список берётся из ваших кабинетов дашборда. Кабинеты без синхронизированных объявлений пока недоступны для выбора.</p>
       </article>
       <article className="card connectionCard">
         <div className="stepLabel">ШАГ 3 · SENLER</div>
@@ -1161,7 +1181,7 @@ function AdsDashboard({ stats, dialogs, serverAds, serverDialogTotal, serverStat
 
   if (serverStatus === "loading" || serverStatus === "error" || serverStatus === "ready") return <div className="pageBlock adsPage">
     <div className="introRow"><div><p className="eyebrow">АТРИБУЦИЯ VK РЕКЛАМЫ · v3.1</p><h2>Какие источники привели обращения</h2><p>Нажмите на источник, чтобы открыть примеры диалогов и проверить классификацию.</p></div></div>
-    {serverStatus==="ready"&&<div className="adDataState">Кабинет «Эмалис» подтверждён через VK Ads API · ID {cabinet?.accountId}. В таблице только его источники.</div>}
+    {serverStatus==="ready"&&<div className="adDataState">Кабинет VK Ads · ID {cabinet?.accountId}. В таблице только его источники.</div>}
     {serverStatus==="loading"&&<div className="adDataState">Загружаю статистику объявлений…</div>}
     {serverStatus==="error"&&<div className="adDataState error">Не удалось сверить источники: {serverError}. Сохранённые числа доступны ниже.</div>}
     {ads.length>0&&serverStatus!=="loading"&&<>

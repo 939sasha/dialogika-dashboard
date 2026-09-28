@@ -1,5 +1,6 @@
 import { createClient } from "@supabase/supabase-js";
 import { publicSupabaseConfig } from "../../lib/supabaseConfig";
+import { dashboardAccounts } from "../../lib/communityAds";
 
 async function authorizedClient(request: Request) {
   const token = request.headers.get("authorization")?.replace(/^Bearer\s+/i, "").trim();
@@ -38,7 +39,10 @@ export async function GET(request: Request) {
     latestAnalysis: row.latest_analysis,
   }));
   const router = rows.find((row) => row.kind === "router");
-  const vkAds = rows.find((row) => row.kind === "vk_ads" && row.external_id === "29867480");
+  const accounts = await dashboardAccounts(auth.client, auth.user.id);
+  const { data: assignments, error: assignmentError } = await auth.client.from("dialogika_connections")
+    .select("external_id,ad_account_id").eq("user_id", auth.user.id).eq("kind", "vk");
+  if (assignmentError) return Response.json({ error: assignmentError.message }, { status: 500 });
   const senlerConnections = rows.filter((row) => row.kind === "senler").map((row) => ({
     communityId: Number(row.external_id),
     name: row.name,
@@ -56,7 +60,8 @@ export async function GET(request: Request) {
     routerKey: router?.credential || "",
     routerCredentialAvailable: Boolean(router?.credential_available),
     senlerConnections,
-    vkAdsConnected: Boolean(vkAds?.credential_available),
+    adAccounts: accounts,
+    adAssignments: Object.fromEntries((assignments || []).map((item) => [item.external_id, item.ad_account_id])),
     credentialRecoveryNeeded,
   });
 }
@@ -72,9 +77,26 @@ export async function PUT(request: Request) {
     photo?: string | null;
     credential?: string;
     latestAnalysis?: unknown;
+    adAccountId?: string | null;
   };
   if (!body?.kind || !body.externalId || (body.kind === "vk_ads" && body.externalId !== "29867480")) {
     return Response.json({ error: "Некорректные данные" }, { status: 400 });
+  }
+
+  if (body.adAccountId !== undefined) {
+    if (body.kind !== "vk") return Response.json({ error: "Некорректные данные" }, { status: 400 });
+    if (body.adAccountId) {
+      const accounts = await dashboardAccounts(auth.client, auth.user.id);
+      if (!accounts.some((item) => item.accountId === body.adAccountId && item.sourcesAvailable)) {
+        return Response.json({ error: "Кабинет не найден или объявления ещё не синхронизированы в дашборде" }, { status: 400 });
+      }
+    }
+    const { data, error } = await auth.client.from("dialogika_connections")
+      .update({ ad_account_id: body.adAccountId || null, updated_at: new Date().toISOString() })
+      .eq("user_id", auth.user.id).eq("kind", "vk").eq("external_id", body.externalId)
+      .select("id").maybeSingle();
+    if (error) return Response.json({ error: error.message }, { status: 500 });
+    if (!data) return Response.json({ error: "Сообщество не найдено" }, { status: 404 });
   }
 
   if (body.credential) {

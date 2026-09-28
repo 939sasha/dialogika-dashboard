@@ -1,5 +1,4 @@
 import { analyzeDialogsWithAi } from "../../../lib/openaiAnalysis";
-import { EMALIS_COMMUNITY_ID } from "../../../lib/vkAdsAccount";
 
 const VK_API = "https://api.vk.com/method";
 const VK_VERSION = "5.199";
@@ -263,10 +262,10 @@ export async function POST(request: Request) {
       verifiedAdIds?: string[];
     };
     if (!token || !groupId || ![30, 60, 90].includes(days) || offset < 0 ||
-        (String(groupId) === EMALIS_COMMUNITY_ID && (!Array.isArray(verifiedAdIds) || !verifiedAdIds.length))) {
+        (!Array.isArray(verifiedAdIds) || !verifiedAdIds.length)) {
       return Response.json({ error: "Некорректные параметры анализа" }, { status: 400 });
     }
-    const allowedAds = String(groupId) === EMALIS_COMMUNITY_ID ? new Set(verifiedAdIds) : null;
+    const allowedAds = new Set(verifiedAdIds);
 
     const cutoff = Math.floor(Date.now() / 1000) - days * 86400;
     const conversations = await vkMethod("messages.getConversations", token, {

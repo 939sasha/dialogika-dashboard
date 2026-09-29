@@ -1242,15 +1242,24 @@ function SenlerConversationList({ conversations, communityId, accessToken }: { c
       setMessages(result.messages); setTruncated(Boolean(result.truncated)); setStatus("ready");
     } catch (cause) { setError(cause instanceof Error ? cause.message : "Переписка недоступна"); setStatus("error"); }
   }
+  const groups = [...conversations.reduce((byPage, item) => {
+    const group = byPage.get(item.subscriptionId) || [];
+    group.push(item);
+    byPage.set(item.subscriptionId, group);
+    return byPage;
+  }, new Map<string, SenlerConversation[]>())].sort((a, b) => b[1].length - a[1].length);
   return <article className="card attributionCard">
     <b>Переписки подписчиков Senler</b>
     <p>Показаны люди, подписавшиеся на страницу, которая указана в объявлениях выбранного кабинета, и имеющие переписку с сообществом. Если у подписки нет ID объявления, её источник остаётся неподтверждённым.</p>
     {!conversations.length && <p>Переписки таких подписчиков в VK не найдены.</p>}
-    {!!conversations.length && <div className="adDialogList">{conversations.map((item) => <article className="adDialogCard" key={item.peerId}>
-      <div className="adDialogMeta"><div><b>Диалог #{item.peerId}</b><small>Страница Senler #{item.subscriptionId} · подписка {item.date || "дата неизвестна"}</small></div></div>
+    {!!groups.length && <div className="senlerPageGroups">{groups.map(([subscriptionId, pageConversations], index) => <details className="senlerPageGroup" key={subscriptionId} open={index === 0}>
+      <summary><span>Страница Senler #{subscriptionId}</span><span>{pageConversations.length} переписок · {pageConversations.filter((item) => item.clientReplied).length} с ответом клиента</span></summary>
+      <div className="adDialogList">{pageConversations.map((item) => <article className="adDialogCard" key={item.peerId}>
+      <div className="adDialogMeta"><div><b>Диалог #{item.peerId}</b><small>Подписка {item.date || "дата неизвестна"}</small></div></div>
       <p>{item.adId ? `Метка объявления VK: ${item.adId}.` : "ID объявления в подписке и переписке не подтверждён."} {item.recent ? "В периоде есть сообщения." : "Последняя активность могла быть раньше выбранного периода."} {item.clientReplied === undefined ? "" : item.clientReplied ? "Клиент ответил." : "Ответа клиента за период нет."}</p>
       <button className="adDialogOpen" onClick={() => openConversation(item)}>Открыть переписку →</button>
-    </article>)}</div>}
+      </article>)}</div>
+    </details>)}</div>}
     {selected && <div className="adDialogOverlay" onMouseDown={(event) => { if (event.currentTarget === event.target) setSelected(null); }}>
       <aside className="adDialogPanel"><div className="adDialogPanelHead"><div><span>ПРОВЕРКА ПОДПИСКИ SENLER</span><h3>Диалог #{selected.peerId}</h3><p>Страница Senler #{selected.subscriptionId}. Телефоны и ссылки скрыты. Источник объявления указан только при подтверждённой метке.</p></div><button onClick={() => setSelected(null)}>×</button></div>
         {status === "loading" && <div className="adDialogLoading">Загружаю переписку из VK…</div>}

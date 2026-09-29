@@ -1252,7 +1252,7 @@ function SenlerConversationList({ conversations, communityId, accessToken }: { c
     <b>Переписки подписчиков Senler</b>
     <p>Показаны люди, подписавшиеся на страницу, которая указана в объявлениях выбранного кабинета, и имеющие переписку с сообществом. Если у подписки нет ID объявления, её источник остаётся неподтверждённым.</p>
     {!conversations.length && <p>Переписки таких подписчиков в VK не найдены.</p>}
-    {!!groups.length && <div className="senlerPageGroups">{groups.map(([subscriptionId, pageConversations], index) => <details className="senlerPageGroup" key={subscriptionId} open={index === 0}>
+    {!!groups.length && <div className="senlerPageGroups">{groups.map(([subscriptionId, pageConversations]) => <details className="senlerPageGroup" key={subscriptionId}>
       <summary><span>Страница Senler #{subscriptionId}</span><span>{pageConversations.length} переписок · {pageConversations.filter((item) => item.clientReplied).length} с ответом клиента</span></summary>
       <div className="adDialogList">{pageConversations.map((item) => <article className="adDialogCard" key={item.peerId}>
       <div className="adDialogMeta"><div><b>Диалог #{item.peerId}</b><small>Подписка {item.date || "дата неизвестна"}</small></div></div>

@@ -1254,9 +1254,9 @@ function SenlerConversationList({ conversations, communityId, accessToken }: { c
     {!conversations.length && <p>Переписки таких подписчиков в VK не найдены.</p>}
     {!!groups.length && <div className="senlerPageGroups">{groups.map(([subscriptionId, pageConversations]) => <details className="senlerPageGroup" key={subscriptionId}>
       <summary><span>Страница Senler #{subscriptionId}</span><span>{pageConversations.length} переписок · {pageConversations.filter((item) => item.clientReplied).length} с ответом клиента</span></summary>
-      <div className="adDialogList">{pageConversations.map((item) => <article className="adDialogCard" key={item.peerId}>
-      <div className="adDialogMeta"><div><b>Диалог #{item.peerId}</b><small>Подписка {item.date || "дата неизвестна"}</small></div></div>
-      <p>{item.adId ? `Метка объявления VK: ${item.adId}.` : "ID объявления в подписке и переписке не подтверждён."} {item.recent ? "В периоде есть сообщения." : "Последняя активность могла быть раньше выбранного периода."} {item.clientReplied === undefined ? "" : item.clientReplied ? "Клиент ответил." : "Ответа клиента за период нет."}</p>
+      <div className="adDialogList">{pageConversations.map((item) => <article className={`adDialogCard ${item.clientReplied === true ? "senlerWithReply" : item.clientReplied === false ? "senlerWithoutReply" : ""}`} key={item.peerId}>
+      <div className="adDialogMeta"><div><b>Диалог #{item.peerId}</b><small>Подписка {item.date || "дата неизвестна"}</small></div>{item.clientReplied !== undefined && <span className="senlerReplyStatus">{item.clientReplied ? "Клиент ответил" : "Клиент не ответил"}</span>}</div>
+      <p>{item.adId ? `Метка объявления VK: ${item.adId}.` : "ID объявления в подписке и переписке не подтверждён."} {item.recent ? "В периоде есть сообщения." : "Последняя активность могла быть раньше выбранного периода."}</p>
       <button className="adDialogOpen" onClick={() => openConversation(item)}>Открыть переписку →</button>
       </article>)}</div>
     </details>)}</div>}

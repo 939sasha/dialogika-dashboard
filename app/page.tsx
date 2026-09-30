@@ -2,6 +2,7 @@
 
 import { ChangeEvent, useEffect, useMemo, useRef, useState } from "react";
 import { createClient, SupabaseClient, User } from "@supabase/supabase-js";
+import AllDialogs from "./all-dialogs";
 
 type Period = "30" | "60" | "90";
 type Community = { id: number; name: string; photo: string | null };
@@ -1025,7 +1026,7 @@ export default function Home() {
         </>}
 
         {tab === "Объявления" && <AdsDashboard stats={liveStats} dialogs={liveDialogs} serverAds={serverAds} serverDialogTotal={serverAdDialogTotal} serverStatus={serverAdsStatus} serverError={serverAdsError} cabinet={adCabinet} accessToken={accessToken} communityId={community?.id || null} onAnalyze={runAnalysis} />}
-        {tab === "Диалоги" && <DialogsTable query={query} setQuery={setQuery} filteredDialogs={filteredDialogs} analyzed={Boolean(liveStats)} />}
+        {tab === "Диалоги" && <><AllDialogs key={community?.id || "none"} communityId={community?.id || null} accessToken={accessToken} /><div className="sectionHead"><h2>Диалоги из рекламы</h2></div><DialogsTable query={query} setQuery={setQuery} filteredDialogs={filteredDialogs} analyzed={Boolean(liveStats)} /></>}
         {tab === "Качество" && <Quality stats={liveStats} />}
         {tab === "ИИ-бот" && <Bot goal={liveStats?.goal} />}
         {tab === "Настройки" && <Settings community={community} connections={connections} openaiConnected={Boolean(openaiKey)} senlerConnected={Boolean(community && senlerConnections.some((item) => item.communityId === community.id && Boolean(item.key)))} adAccounts={adAccounts} adAccountId={community ? adAssignments[String(community.id)] || "" : ""} busy={busy || syncingAccounts} onConnect={connectCommunity} onSelect={selectCommunity} onConnectOpenAI={connectOpenAI} onConnectSenler={connectSenler} onConnectVkAds={connectVkAds} onSyncMissingAdIds={syncMissingAdIds} syncingAccounts={syncingAccounts} onDisconnectOpenAI={async () => { await deleteSetting("router", "default", accessToken); setOpenaiKey(""); setNotice("Router Cheap отключён. Ключ удалён из вашего аккаунта."); }} onDisconnectSenler={async () => { if (!community) return; await deleteSetting("senler", String(community.id), accessToken); setSenlerConnections((current) => current.filter((item) => item.communityId !== community.id)); setNotice("Senler отключён. Ключ удалён из вашего аккаунта."); }} onDisconnect={disconnectCommunity} />}

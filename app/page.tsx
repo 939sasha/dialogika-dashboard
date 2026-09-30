@@ -1026,7 +1026,7 @@ export default function Home() {
         </>}
 
         {tab === "Объявления" && <AdsDashboard stats={liveStats} dialogs={liveDialogs} serverAds={serverAds} serverDialogTotal={serverAdDialogTotal} serverStatus={serverAdsStatus} serverError={serverAdsError} cabinet={adCabinet} accessToken={accessToken} communityId={community?.id || null} onAnalyze={runAnalysis} />}
-        {tab === "Диалоги" && <><AllDialogs key={community?.id || "none"} communityId={community?.id || null} accessToken={accessToken} /><div className="sectionHead"><h2>Диалоги из рекламы</h2></div><DialogsTable query={query} setQuery={setQuery} filteredDialogs={filteredDialogs} analyzed={Boolean(liveStats)} /></>}
+        {tab === "Диалоги" && <><AllDialogs key={community?.id || "none"} communityId={community?.id || null} accessToken={accessToken} /><div className="sectionHead"><h2>Диалоги из рекламы</h2></div><DialogsTable key={community?.id || "none"} query={query} setQuery={setQuery} filteredDialogs={filteredDialogs} analyzed={Boolean(liveStats)} communityId={community?.id || null} accessToken={accessToken} /></>}
         {tab === "Качество" && <Quality stats={liveStats} />}
         {tab === "ИИ-бот" && <Bot goal={liveStats?.goal} />}
         {tab === "Настройки" && <Settings community={community} connections={connections} openaiConnected={Boolean(openaiKey)} senlerConnected={Boolean(community && senlerConnections.some((item) => item.communityId === community.id && Boolean(item.key)))} adAccounts={adAccounts} adAccountId={community ? adAssignments[String(community.id)] || "" : ""} busy={busy || syncingAccounts} onConnect={connectCommunity} onSelect={selectCommunity} onConnectOpenAI={connectOpenAI} onConnectSenler={connectSenler} onConnectVkAds={connectVkAds} onSyncMissingAdIds={syncMissingAdIds} syncingAccounts={syncingAccounts} onDisconnectOpenAI={async () => { await deleteSetting("router", "default", accessToken); setOpenaiKey(""); setNotice("Router Cheap отключён. Ключ удалён из вашего аккаунта."); }} onDisconnectSenler={async () => { if (!community) return; await deleteSetting("senler", String(community.id), accessToken); setSenlerConnections((current) => current.filter((item) => item.communityId !== community.id)); setNotice("Senler отключён. Ключ удалён из вашего аккаунта."); }} onDisconnect={disconnectCommunity} />}
@@ -1213,7 +1213,25 @@ function ProblemCard({ number, color, title, count, total, text }: { number: str
   return <article className="problem"><span className="problemNo">{number}</span><div className="problemDot" style={{ background: color }} /><h3>{title}</h3><p>{text}</p><div><b>{count}</b><span>диалогов</span><b>{pct(count, total)}%</b><span>от всех диалогов</span></div></article>;
 }
 
-function DialogsTable({ query, setQuery, filteredDialogs, analyzed }: { query: string; setQuery: (v: string) => void; filteredDialogs: LiveDialog[]; analyzed: boolean }) {
+function DialogsTable({ query, setQuery, filteredDialogs, analyzed, communityId, accessToken }: { query: string; setQuery: (v: string) => void; filteredDialogs: LiveDialog[]; analyzed: boolean; communityId: number | null; accessToken: string }) {
+  const [selected, setSelected] = useState<LiveDialog | null>(null);
+  const [messages, setMessages] = useState<EvidenceMessage[]>([]);
+  const [detailStatus, setDetailStatus] = useState<"loading" | "ready" | "error">("loading");
+  const [detailError, setDetailError] = useState("");
+  const [truncated, setTruncated] = useState(false);
+  async function openDialog(dialog: LiveDialog) {
+    if (!communityId || !accessToken) return;
+    setSelected(dialog); setMessages([]); setDetailStatus("loading"); setDetailError("");
+    try {
+      const response = await fetch(`/api/vk/senler-dialogs?communityId=${communityId}&peerId=${dialog.peerId}`, {
+        headers: { authorization: `Bearer ${accessToken}` }, cache: "no-store" });
+      const result = await response.json() as { messages?: EvidenceMessage[]; truncated?: boolean; error?: string };
+      if (!response.ok || !Array.isArray(result.messages)) throw new Error(result.error || "VK не вернул переписку");
+      setMessages(result.messages); setTruncated(Boolean(result.truncated)); setDetailStatus("ready");
+    } catch (cause) {
+      setDetailError(cause instanceof Error ? cause.message : "Переписка недоступна"); setDetailStatus("error");
+    }
+  }
   if (!analyzed) return <div className="pageBlock"><EmptyState title="Диалоги ещё не анализировались" text="Сначала запустите полный анализ на странице «Обзор»." /></div>;
   return <div className="pageBlock">
     <div className="introRow"><div><h2>Разобранные диалоги</h2><p>Статус показывает риск по формальным признакам и не является подтверждённым исходом продажи.</p></div><input className="search" value={query} onChange={(e) => setQuery(e.target.value)} placeholder="ID, статус или причина" /></div>
@@ -1222,7 +1240,14 @@ function DialogsTable({ query, setQuery, filteredDialogs, analyzed }: { query: s
       <span><i className="legendRisk" /> <b>Риск</b> — интерес есть, цель не найдена</span>
       <span><i className="legendLost" /> <b>Потерян</b> — цель не найдена и последнее сообщение осталось без ответа</span>
     </div>
-    <div className="tableCard">{filteredDialogs.map((d) => <div className="dialogRow liveRow aiDialogRow" key={d.peerId}><span className="avatar">VK</span><div><b>Диалог #{d.peerId}</b><small>{d.adId ? `Рекламная метка: ${d.adId}` : d.intent || "Намерение не определено"}</small></div><span className={`badge ${d.status}`}>{d.status}</span><div><small>Оценка ИИ · уверенность {d.confidence || 0}%</small><b>{d.score}/100</b></div><div className="issueCell"><small>Вывод ИИ</small><b>{d.issue}</b><small>{d.nuance}</small></div><div className="aiAdvice"><small>Как улучшить</small><b>{d.recommendation}</b>{d.betterReply && <em>Пример ответа: «{d.betterReply}»</em>}</div></div>)}</div>
+    <div className="tableCard">{filteredDialogs.map((d) => <div className="dialogRow liveRow aiDialogRow clickableDialogRow" key={d.peerId} role="button" tabIndex={0} aria-label={`Открыть переписку, диалог ${d.peerId}`} onClick={() => openDialog(d)} onKeyDown={(event) => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); openDialog(d); } }}><span className="avatar">VK</span><div><b>Диалог #{d.peerId}</b><small>{d.adId ? `Рекламная метка: ${d.adId}` : d.intent || "Намерение не определено"}</small><small className="dialogOpenHint">Открыть переписку →</small></div><span className={`badge ${d.status}`}>{d.status}</span><div><small>Оценка ИИ · уверенность {d.confidence || 0}%</small><b>{d.score}/100</b></div><div className="issueCell"><small>Вывод ИИ</small><b>{d.issue}</b><small>{d.nuance}</small></div><div className="aiAdvice"><small>Как улучшить</small><b>{d.recommendation}</b>{d.betterReply && <em>Пример ответа: «{d.betterReply}»</em>}</div></div>)}</div>
+    {selected && <div className="adDialogOverlay" onMouseDown={(event) => { if (event.currentTarget === event.target) setSelected(null); }}>
+      <aside className="adDialogPanel" role="dialog" aria-modal="true" aria-label={`Диалог ${selected.peerId}`}><div className="adDialogPanelHead"><div><span>ПРОВЕРКА КЛАССИФИКАЦИИ</span><h3>Диалог #{selected.peerId}</h3><p>{selected.issue} Контактные данные скрыты.</p></div><button onClick={() => setSelected(null)} aria-label="Закрыть переписку">×</button></div>
+        {detailStatus === "loading" && <div className="adDialogLoading">Загружаю переписку из VK…</div>}
+        {detailStatus === "error" && <div className="adDialogLoading error">{detailError}</div>}
+        {detailStatus === "ready" && <div className="conversationTranscript"><strong>Переписка · {messages.length} сообщений</strong>{truncated && <p>Показаны последние 1000 сообщений.</p>}{messages.map((message, index) => <div className="conversationEntry" key={index}><b>{message.role} · {message.date}</b><p>{message.text}</p></div>)}</div>}
+      </aside>
+    </div>}
   </div>;
 }
 
